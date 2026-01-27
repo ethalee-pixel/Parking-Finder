@@ -1,5 +1,5 @@
 import React, {useState} from 'react';
-import { View, TextInput, StyleSheet, ActivityIndicator, Button } from 'react-native';
+import { View, TextInput, StyleSheet, ActivityIndicator, Button, KeyboardAvoidingView } from 'react-native';
 import { FIREBASE_AUTH } from '../../FirebaseConfig';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
 
@@ -39,6 +39,7 @@ const Login = () => {
 
 return (
         <View style={styles.container}>
+            <KeyboardAvoidingView behavior="padding">
             <TextInput 
                 value={email} 
                 style={styles.input} 
@@ -63,6 +64,7 @@ return (
                     <Button title="Create Account" onPress={signUp} />
                 </>
             )}
+            </KeyboardAvoidingView>
         </View>
     );
 };
