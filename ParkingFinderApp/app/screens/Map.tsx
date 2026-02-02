@@ -15,6 +15,7 @@ import {
 import MapView, { Region, Marker, MapPressEvent } from "react-native-maps";
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { createParkingReport } from "../../parkingReports";
 
 type ParkingSpot = {
   id: string;
@@ -136,7 +137,7 @@ export default function MapScreen() {
     setShowModal(true);
   };
 
-  const saveSpot = () => {
+  const saveSpot = async () => {
     if (!pendingCoord) return;
 
     if (spotType === "paid" && rate.trim() === "") {
@@ -157,6 +158,23 @@ export default function MapScreen() {
     console.log(`Created new spot at ${new Date().toLocaleTimeString()}`);
     setSpots((prev) => [...prev, newSpot]);
     closeModal();
+
+    // Added Firestore save for parking reports
+    try {
+    const docId = await createParkingReport({
+      latitude: newSpot.latitude,
+      longitude: newSpot.longitude,
+      type: newSpot.type,
+      rate: newSpot.rate,
+    });
+     console.log("Saved to Firestore docId:", docId);
+    } catch (e: any) {
+    console.log("Firestore write failed:", e?.message ?? e);
+    Alert.alert(
+      "Saved locally, but cloud save failed",
+      e?.message ?? "Check Firestore rules/auth."
+      );
+    }
   };
 
   const closeModal = () => {
