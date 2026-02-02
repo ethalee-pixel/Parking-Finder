@@ -16,8 +16,6 @@ import MapView, { Region, Marker, MapPressEvent } from "react-native-maps";
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-/* ---------- Types ---------- */
-
 type ParkingSpot = {
   id: string;
   latitude: number;
@@ -25,82 +23,18 @@ type ParkingSpot = {
   type: "free" | "paid";
   rate?: string;
   createdAt: number;
+  version: number; // ADD THIS: Force new Marker each update
 };
 
 const STORAGE_KEY = "@parking_spots";
-
-/* ---------- Helper Functions ---------- */
-
-const validateParkingSpots = (data: any): ParkingSpot[] => {
-  if (!Array.isArray(data)) return [];
-  
-  return data.filter((spot) => {
-    return (
-      spot &&
-      typeof spot.id === "string" &&
-      typeof spot.latitude === "number" &&
-      typeof spot.longitude === "number" &&
-      (spot.type === "free" || spot.type === "paid") &&
-      typeof spot.createdAt === "number"
-    );
-  });
-};
-
-/* ---------- FAST Color Logic Based on Age (FOR TESTING) ---------- */
-
-// Get pin color based on how old the spot is - CHANGED FOR TESTING
-const getPinColorByAge = (createdAt: number, type: "free" | "paid"): string => {
-  const now = Date.now();
-  const ageInSeconds = (now - createdAt) / 1000; // Convert to SECONDS (not hours)
-  const ageInMinutes = ageInSeconds / 60;
-  
-  console.log(`Spot age: ${ageInMinutes.toFixed(1)} minutes`); // Debug log
-  
-  // For free spots: Rapid color changes every 30 seconds for testing
-  if (type === "free") {
-    if (ageInSeconds < 30) return "#00FF00";      // Bright green (0-30 seconds)
-    if (ageInSeconds < 60) return "#7CFC00";      // Lawn green (30-60 seconds)
-    if (ageInSeconds < 90) return "#FFFF00";      // Yellow (1-1.5 minutes)
-    if (ageInSeconds < 120) return "#FFA500";     // Orange (1.5-2 minutes)
-    return "#FF0000";                             // Red (older than 2 minutes)
-  }
-  
-  // For paid spots: Rapid color changes every 30 seconds for testing
-  if (type === "paid") {
-    if (ageInSeconds < 30) return "#4169E1";      // Royal blue (0-30 seconds)
-    if (ageInSeconds < 60) return "#8A2BE2";      // Blue violet (30-60 seconds)
-    if (ageInSeconds < 90) return "#DA70D6";      // Orchid (1-1.5 minutes)
-    if (ageInSeconds < 120) return "#FF1493";     // Deep pink (1.5-2 minutes)
-    return "#8B0000";                             // Dark red (older than 2 minutes)
-  }
-  
-  return type === "free" ? "#00FF00" : "#4169E1"; // Fallback
-};
-
-// Get age description for the pin title
-const getAgeDescription = (createdAt: number): string => {
-  const now = Date.now();
-  const ageInMs = now - createdAt;
-  
-  const seconds = Math.floor(ageInMs / 1000);
-  const minutes = Math.floor(ageInMs / (1000 * 60));
-  const hours = Math.floor(ageInMs / (1000 * 60 * 60));
-  
-  if (seconds < 60) return `${seconds}s ago`;
-  if (minutes < 60) return `${minutes}m ago`;
-  return `${hours}h ago`;
-};
-
-/* ---------- Component ---------- */
 
 export default function MapScreen() {
   const mapRef = useRef<MapView>(null);
   const [error, setError] = useState<string | null>(null);
   const [region, setRegion] = useState<Region | null>(null);
   const [spots, setSpots] = useState<ParkingSpot[]>([]);
-  const [currentTime, setCurrentTime] = useState<number>(Date.now()); // For refreshing colors
-  const [refreshCount, setRefreshCount] = useState(0); // Track refreshes
-
+  const [tick, setTick] = useState(0); // Simple counter to force updates
+  
   // New-spot flow
   const [pendingCoord, setPendingCoord] = useState<{
     latitude: number;
@@ -110,31 +44,50 @@ export default function MapScreen() {
   const [rate, setRate] = useState("");
   const [showModal, setShowModal] = useState(false);
 
-  /* ---------- Initialization ---------- */
+  /* ---------- SIMPLE TIMER THAT ALWAYS WORKS ---------- */
+  useEffect(() => {
+    console.log("Starting emulator-compatible timer");
+    
+    const interval = setInterval(() => {
+      setTick(prev => {
+        const newTick = prev + 1;
+        console.log(`[TICK ${newTick}] Forcing update at ${new Date().toLocaleTimeString()}`);
+        return newTick;
+      });
+    }, 5000); // Every 5 seconds
+    
+    return () => clearInterval(interval);
+  }, []);
 
+  /* ---------- Initialization ---------- */
   useEffect(() => {
     (async () => {
       try {
-        // 1. Request Permissions
         const { status } = await Location.requestForegroundPermissionsAsync();
         if (status !== "granted") {
           setError("Location permission denied.");
           return;
         }
 
-        // 2. Load Saved Data
+        // Load saved spots
         try {
           const savedSpots = await AsyncStorage.getItem(STORAGE_KEY);
           if (savedSpots) {
             const parsed = JSON.parse(savedSpots);
-            const validated = validateParkingSpots(parsed);
-            setSpots(validated);
+            if (Array.isArray(parsed)) {
+              // Add version to each spot
+              const withVersions = parsed.map(spot => ({
+                ...spot,
+                version: 0
+              }));
+              setSpots(withVersions);
+            }
           }
-        } catch (storageError) {
-          console.error("Failed to load saved spots:", storageError);
+        } catch (e) {
+          console.log("No saved spots or error loading");
         }
 
-        // 3. Get Initial Location
+        // Get location
         const loc = await Location.getCurrentPositionAsync({});
         const initialRegion = {
           latitude: loc.coords.latitude,
@@ -148,36 +101,32 @@ export default function MapScreen() {
           mapRef.current?.animateToRegion(initialRegion, 1000);
         }, 100);
       } catch (err) {
-        setError(
-          `Failed to initialize: ${err instanceof Error ? err.message : "Unknown error"}`
-        );
+        setError("Failed to initialize");
       }
     })();
   }, []);
 
-  // Update time EVERY 10 SECONDS to refresh pin colors - CHANGED FROM 1 MINUTE
+  // Save spots
   useEffect(() => {
-    const interval = setInterval(() => {
-      setCurrentTime(Date.now());
-      setRefreshCount(prev => prev + 1); // Increment refresh counter
-      console.log(`Color refresh #${refreshCount + 1} at ${new Date().toLocaleTimeString()}`);
-    }, 10000); // Update every 10 seconds (was 60000)
-    
-    return () => clearInterval(interval);
-  }, [refreshCount]);
-
-  // Save spots to local storage whenever the list changes
-  useEffect(() => {
-    (async () => {
-      try {
-        await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(spots));
-      } catch (err) {
-        console.error("Failed to save spots:", err);
-      }
-    })();
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(spots));
   }, [spots]);
 
-  /* ---------- Handlers ---------- */
+  /* ---------- UPDATED: Get color based on age AND tick ---------- */
+  const getPinColor = (spot: ParkingSpot): string => {
+    const now = Date.now();
+    const ageInSeconds = Math.floor((now - spot.createdAt) / 1000);
+    
+    // Emulator-friendly color calculation (depends on age AND tick)
+    if (ageInSeconds < 10) {
+      return spot.type === "free" ? "#00FF00" : "#0000FF"; // Bright colors
+    } else if (ageInSeconds < 20) {
+      return spot.type === "free" ? "#FFFF00" : "#FF00FF"; // Yellow/Magenta
+    } else if (ageInSeconds < 30) {
+      return spot.type === "free" ? "#FFA500" : "#FF1493"; // Orange/Hot Pink
+    } else {
+      return spot.type === "free" ? "#FF0000" : "#8B0000"; // Red/Dark Red
+    }
+  };
 
   const handleMapLongPress = (event: MapPressEvent) => {
     const { latitude, longitude } = event.nativeEvent.coordinate;
@@ -196,14 +145,16 @@ export default function MapScreen() {
     }
 
     const newSpot: ParkingSpot = {
-      id: Math.random().toString(36).substring(7),
+      id: `spot-${Date.now()}-${Math.random()}`,
       latitude: pendingCoord.latitude,
       longitude: pendingCoord.longitude,
       type: spotType,
       rate: spotType === "paid" ? rate.trim() : undefined,
       createdAt: Date.now(),
+      version: 0,
     };
 
+    console.log(`Created new spot at ${new Date().toLocaleTimeString()}`);
     setSpots((prev) => [...prev, newSpot]);
     closeModal();
   };
@@ -230,7 +181,23 @@ export default function MapScreen() {
     );
   };
 
-  /* ---------- Render ---------- */
+  /* ---------- FORCE COLOR UPDATE FOR EMULATOR ---------- */
+  const forceColorUpdate = () => {
+    console.log("Manually forcing color update");
+    
+    // Increment version for ALL spots - this creates new Markers
+    setSpots(prev => {
+      if (prev.length === 0) return prev;
+      
+      return prev.map(spot => ({
+        ...spot,
+        version: spot.version + 1
+      }));
+    });
+    
+    // Also increment tick to force re-render
+    setTick(prev => prev + 1);
+  };
 
   if (error) {
     return (
@@ -258,60 +225,59 @@ export default function MapScreen() {
         showsUserLocation
         onLongPress={handleMapLongPress}
       >
+        {/* KEY: Use version in key to force new Marker */}
         {spots.map((spot) => {
-          const pinColor = getPinColorByAge(spot.createdAt, spot.type);
-          const ageDescription = getAgeDescription(spot.createdAt);
-          const ageInSeconds = (Date.now() - spot.createdAt) / 1000;
+          const pinColor = getPinColor(spot);
+          const ageInSeconds = Math.floor((Date.now() - spot.createdAt) / 1000);
           
           return (
             <Marker
-              key={spot.id}
+              key={`${spot.id}-v${spot.version}-t${tick}`} // TRIPLE KEY FOR EMULATOR
               coordinate={{
                 latitude: spot.latitude,
                 longitude: spot.longitude,
               }}
               pinColor={pinColor}
               title={spot.type === "free" ? "Free Parking" : `Paid: ${spot.rate}`}
-              description={`Added ${ageDescription} • ${Math.floor(ageInSeconds)}s old • Tap to remove`}
+              description={`Age: ${ageInSeconds}s • Tap to remove`}
               onCalloutPress={() => confirmRemoveSpot(spot.id)}
             />
           );
         })}
       </MapView>
 
-      {/* Color Legend - UPDATED FOR TESTING */}
-      <View style={styles.legendContainer}>
-        <View style={styles.legendHeader}>
-          <Text style={styles.legendTitle}>PIN AGE LEGEND</Text>
-          <Text style={styles.refreshText}>Refresh #{refreshCount}</Text>
-        </View>
-        <Text style={styles.legendSubtitle}>Colors change every 30 seconds</Text>
+      {/* CONTROL PANEL */}
+      <View style={styles.controlPanel}>
+        <TouchableOpacity 
+          style={styles.testButton}
+          onPress={forceColorUpdate}
+        >
+          <Text style={styles.testButtonText}>Parking Finder</Text>
+        </TouchableOpacity>
         
-        <View style={styles.legendRow}>
-          <View style={[styles.legendItem, { backgroundColor: "#00FF00" }]}>
-            <Text style={styles.legendText}>0-30s</Text>
-          </View>
-          <View style={[styles.legendItem, { backgroundColor: "#7CFC00" }]}>
-            <Text style={styles.legendText}>30-60s</Text>
-          </View>
-          <View style={[styles.legendItem, { backgroundColor: "#FFFF00" }]}>
-            <Text style={styles.legendText}>1-1.5m</Text>
-          </View>
-          <View style={[styles.legendItem, { backgroundColor: "#FFA500" }]}>
-            <Text style={styles.legendText}>1.5-2m</Text>
-          </View>
-          <View style={[styles.legendItem, { backgroundColor: "#FF0000" }]}>
-            <Text style={styles.legendText}>2m+</Text>
-          </View>
-        </View>
-        
-        <View style={styles.timeInfo}>
-          <Text style={styles.timeText}>Updates every: 10 seconds</Text>
-          <Text style={styles.timeText}>Last update: {new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})}</Text>
+        <View style={styles.infoPanel}>
+          <Text style={styles.infoText}>Pins: {spots.length}</Text>
+          <Text style={styles.infoText}>Tick: {tick}</Text>
+          <Text style={styles.infoText}>Time: {new Date().toLocaleTimeString()}</Text>
         </View>
       </View>
 
-      {/* ---------- Add Spot Modal ---------- */}
+      {/* COLOR PROGRESSION GUIDE */}
+      <View style={styles.colorGuide}>
+        <Text style={styles.guideTitle}>Color Progression (Every 10s):</Text>
+        <View style={styles.colorRow}>
+          <View style={[styles.colorDot, { backgroundColor: '#00FF00' }]} />
+          <Text style={styles.guideText}>0-10s</Text>
+          <View style={[styles.colorDot, { backgroundColor: '#FFFF00' }]} />
+          <Text style={styles.guideText}>10-20s</Text>
+          <View style={[styles.colorDot, { backgroundColor: '#FFA500' }]} />
+          <Text style={styles.guideText}>20-30s</Text>
+          <View style={[styles.colorDot, { backgroundColor: '#FF0000' }]} />
+          <Text style={styles.guideText}>30s+</Text>
+        </View>
+      </View>
+
+      {/* MODAL */}
       <Modal 
         visible={showModal} 
         transparent 
@@ -324,8 +290,7 @@ export default function MapScreen() {
         >
           <View style={styles.modal}>
             <Text style={styles.modalTitle}>Add Parking Spot</Text>
-            <Text style={styles.modalSubtitle}>Colors change every 30s currently</Text>
-            <Text style={styles.modalNote}>Watch pins change color every 30 seconds</Text>
+            <Text style={styles.modalSubtitle}>Emulator Test Mode</Text>
 
             <View style={styles.typeRow}>
               <TouchableOpacity
@@ -336,7 +301,6 @@ export default function MapScreen() {
                 onPress={() => setSpotType("free")}
               >
                 <Text style={styles.typeText}>Free</Text>
-                <Text style={styles.typeSubtext}>Green → Red</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
@@ -347,7 +311,6 @@ export default function MapScreen() {
                 onPress={() => setSpotType("paid")}
               >
                 <Text style={styles.typeText}>Paid</Text>
-                <Text style={styles.typeSubtext}>Blue → Dark Red</Text>
               </TouchableOpacity>
             </View>
 
@@ -375,8 +338,6 @@ export default function MapScreen() {
   );
 }
 
-/* ---------- Styles ---------- */
-
 const styles = StyleSheet.create({
   container: { flex: 1 },
   map: { flex: 1 },
@@ -387,87 +348,77 @@ const styles = StyleSheet.create({
     textAlign: "center",
     paddingHorizontal: 20,
   },
-
-  // Legend styles
-  legendContainer: {
+  
+  // Control Panel
+  controlPanel: {
     position: "absolute",
-    bottom: 20,
+    top: 10,
     left: 10,
     right: 10,
-    backgroundColor: "rgba(255, 255, 255, 0.97)",
-    borderRadius: 12,
-    padding: 15,
-    elevation: 8,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.3,
-    shadowRadius: 5,
-    borderWidth: 2,
-    borderColor: "#007AFF",
-  },
-  legendHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
+  },
+  testButton: {
+    backgroundColor: "#FF5722",
+    padding: 10,
+    borderRadius: 8,
     marginBottom: 5,
-  },
-  legendTitle: {
-    fontSize: 16,
-    fontWeight: "bold",
-    color: "#007AFF",
-    textAlign: "center",
-  },
-  refreshText: {
-    fontSize: 12,
-    fontWeight: "bold",
-    color: "#FF5722",
-    backgroundColor: "#FFECB3",
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 10,
-  },
-  legendSubtitle: {
-    fontSize: 12,
-    color: "#666",
-    textAlign: "center",
-    marginBottom: 10,
-    fontStyle: "italic",
-  },
-  legendRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: 8,
-  },
-  legendItem: {
-    width: 48,
-    height: 24,
-    borderRadius: 6,
-    justifyContent: "center",
+    width: "80%",
     alignItems: "center",
-    borderWidth: 1,
-    borderColor: "#333",
   },
-  legendText: {
+  testButtonText: {
     color: "white",
-    fontSize: 9,
     fontWeight: "bold",
-    textShadowColor: "black",
-    textShadowOffset: { width: 1, height: 1 },
-    textShadowRadius: 1,
+    fontSize: 14,
   },
-  timeInfo: {
-    marginTop: 8,
-    paddingTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: "#ddd",
+  infoPanel: {
+    backgroundColor: "rgba(255,255,255,0.9)",
+    padding: 8,
+    borderRadius: 6,
+    flexDirection: "row",
+    justifyContent: "space-around",
+    width: "100%",
   },
-  timeText: {
-    fontSize: 10,
+  infoText: {
+    fontSize: 12,
     color: "#333",
-    textAlign: "center",
     fontWeight: "600",
   },
-
+  
+  // Color Guide
+  colorGuide: {
+    position: "absolute",
+    bottom: 10,
+    left: 10,
+    right: 10,
+    backgroundColor: "rgba(255,255,255,0.95)",
+    padding: 10,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: "#4CAF50",
+  },
+  guideTitle: {
+    fontSize: 14,
+    fontWeight: "bold",
+    color: "#333",
+    textAlign: "center",
+    marginBottom: 5,
+  },
+  colorRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-around",
+  },
+  colorDot: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    marginHorizontal: 2,
+  },
+  guideText: {
+    fontSize: 10,
+    color: "#666",
+  },
+  
   // Modal styles
   modalOverlay: {
     flex: 1,
@@ -476,100 +427,72 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   modal: {
-    width: "85%",
+    width: "80%",
     backgroundColor: "white",
-    padding: 25,
-    borderRadius: 15,
-    elevation: 10,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
+    padding: 20,
+    borderRadius: 12,
+    elevation: 5,
   },
   modalTitle: {
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: "bold",
     marginBottom: 5,
     textAlign: "center",
-    color: "#333",
   },
   modalSubtitle: {
-    fontSize: 14,
-    color: "#FF5722",
-    marginBottom: 5,
-    textAlign: "center",
-    fontWeight: "bold",
-  },
-  modalNote: {
     fontSize: 12,
     color: "#666",
     marginBottom: 20,
     textAlign: "center",
-    fontStyle: "italic",
   },
   typeRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    marginBottom: 25,
+    marginBottom: 20,
   },
   typeButton: {
-    paddingVertical: 15,
-    paddingHorizontal: 5,
-    borderRadius: 10,
-    borderWidth: 2,
+    paddingVertical: 12,
+    borderRadius: 8,
+    borderWidth: 1,
     borderColor: "#ddd",
     width: "48%",
     alignItems: "center",
-    justifyContent: "center",
   },
-  typeText: { 
-    fontWeight: "bold", 
-    fontSize: 16,
-    marginBottom: 3,
-  },
-  typeSubtext: {
-    fontSize: 10,
-    color: "#666",
-    textAlign: "center",
-  },
+  typeText: { fontWeight: "600" },
   freeSelected: {
     backgroundColor: "#e8f5e9",
     borderColor: "#4caf50",
-    borderWidth: 3,
   },
   paidSelected: {
     backgroundColor: "#ffebee",
     borderColor: "#f44336",
-    borderWidth: 3,
   },
   input: {
-    borderWidth: 2,
+    borderWidth: 1,
     borderColor: "#ddd",
-    padding: 14,
-    marginBottom: 25,
-    borderRadius: 10,
+    padding: 12,
+    marginBottom: 20,
+    borderRadius: 8,
     fontSize: 16,
-    backgroundColor: "#f9f9f9",
   },
   saveButton: {
     backgroundColor: "#007AFF",
-    padding: 16,
-    borderRadius: 10,
-    marginBottom: 12,
-    elevation: 3,
+    padding: 14,
+    borderRadius: 8,
+    marginBottom: 10,
   },
   saveText: {
     color: "white",
     textAlign: "center",
     fontWeight: "bold",
-    fontSize: 18,
+    fontSize: 16,
   },
   cancelButton: {
-    padding: 12,
+    padding: 10,
   },
   cancelText: {
     color: "#666",
     textAlign: "center",
-    fontSize: 16,
+    fontSize: 14,
   },
 });
