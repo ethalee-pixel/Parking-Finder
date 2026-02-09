@@ -12,13 +12,11 @@ import {
   Platform,
   Keyboard,
 } from "react-native";
-import MapView, { Region, Marker, MapPressEvent } from "react-native-maps";
+import MapView, { Region, Marker, MapPressEvent, Callout } from "react-native-maps";
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { createParkingReport } from "../../parkingReports";
-import { subscribeToParkingReports, ParkingReport } from "../../parkingReports";
+import { createParkingReport, subscribeToParkingReports, ParkingReport } from "../../parkingReports";
 import { FIREBASE_AUTH } from "../../FirebaseConfig";
-
 
 type ParkingSpot = {
   id: string;
@@ -26,8 +24,8 @@ type ParkingSpot = {
   longitude: number;
   type: "free" | "paid";
   rate?: string;
-  createdAt: number;
-  version: number; // ADD THIS: Force new Marker each update
+  createdAt: any; // Using any to handle both Number and Firestore Timestamp
+  version: number;
 };
 
 const STORAGE_KEY = "@parking_spots";
@@ -37,34 +35,41 @@ export default function MapScreen() {
   const [error, setError] = useState<string | null>(null);
   const [region, setRegion] = useState<Region | null>(null);
   const [spots, setSpots] = useState<ParkingSpot[]>([]);
-  const [tick, setTick] = useState(0); // Simple counter to force updates
+  const [tick, setTick] = useState(0);
   const [cloudReports, setCloudReports] = useState<ParkingReport[]>([]);
   
-  // New-spot flow
-  const [pendingCoord, setPendingCoord] = useState<{
-    latitude: number;
-    longitude: number;
-  } | null>(null);
+  const [pendingCoord, setPendingCoord] = useState<{ latitude: number; longitude: number } | null>(null);
   const [spotType, setSpotType] = useState<"free" | "paid">("free");
   const [rate, setRate] = useState("");
   const [showModal, setShowModal] = useState(false);
 
-  /* ---------- SIMPLE TIMER THAT ALWAYS WORKS ---------- */
+  /* ---------- HELPER: Parse Time for Firestore & JS ---------- */
+  const getTimeInMillis = (timeData: any) => {
+    if (!timeData) return Date.now();
+    // Handle Firestore Timestamp {seconds, nanoseconds}
+    if (timeData.seconds) return timeData.seconds * 1000;
+    // Handle standard JS Date/Number
+    return typeof timeData === 'number' ? timeData : new Date(timeData).getTime();
+  };
+
+  const getPinColor = (createdAt: any): string => {
+    const timeInMillis = getTimeInMillis(createdAt);
+    const ageInSeconds = Math.floor((Date.now() - timeInMillis) / 1000);
+    
+    if (ageInSeconds < 10) return "#00FF00"; // Fresh (Green)
+    if (ageInSeconds < 20) return "#FFFF00"; // Stale (Yellow)
+    if (ageInSeconds < 30) return "#FFA500"; // Old (Orange)
+    return "#FF0000"; // Unreliable (Red)
+  };
+
+  /* ---------- TIMERS & SUBSCRIPTIONS ---------- */
   useEffect(() => {
-    console.log("Starting emulator-compatible timer");
-    
     const interval = setInterval(() => {
-      setTick(prev => {
-        const newTick = prev + 1;
-        console.log(`[TICK ${newTick}] Forcing update at ${new Date().toLocaleTimeString()}`);
-        return newTick;
-      });
-    }, 5000); // Every 5 seconds
-    
+      setTick(prev => prev + 1);
+    }, 5000); 
     return () => clearInterval(interval);
   }, []);
 
-  /* ---------- Initialization ---------- */
   useEffect(() => {
     (async () => {
       try {
@@ -74,25 +79,14 @@ export default function MapScreen() {
           return;
         }
 
-        // Load saved spots
-        try {
-          const savedSpots = await AsyncStorage.getItem(STORAGE_KEY);
-          if (savedSpots) {
-            const parsed = JSON.parse(savedSpots);
-            if (Array.isArray(parsed)) {
-              // Add version to each spot
-              const withVersions = parsed.map(spot => ({
-                ...spot,
-                version: 0
-              }));
-              setSpots(withVersions);
-            }
+        const savedSpots = await AsyncStorage.getItem(STORAGE_KEY);
+        if (savedSpots) {
+          const parsed = JSON.parse(savedSpots);
+          if (Array.isArray(parsed)) {
+            setSpots(parsed.map(spot => ({ ...spot, version: 0 })));
           }
-        } catch (e) {
-          console.log("No saved spots or error loading");
         }
 
-        // Get location
         const loc = await Location.getCurrentPositionAsync({});
         const initialRegion = {
           latitude: loc.coords.latitude,
@@ -100,49 +94,26 @@ export default function MapScreen() {
           latitudeDelta: 0.01,
           longitudeDelta: 0.01,
         };
-        
         setRegion(initialRegion);
-        setTimeout(() => {
-          mapRef.current?.animateToRegion(initialRegion, 1000);
-        }, 100);
       } catch (err) {
         setError("Failed to initialize");
       }
     })();
   }, []);
 
-  // Live updates from Firestore (updates map whenever anyone adds a report)
   useEffect(() => {
-  const unsub = subscribeToParkingReports(
-    (reports) => setCloudReports(reports),
-    (err) => console.log("subscribeToParkingReports error:", err?.message ?? err)
-  );
-
-  return unsub;
+    const unsub = subscribeToParkingReports(
+      (reports) => setCloudReports(reports),
+      (err) => console.log("Firestore error:", err)
+    );
+    return unsub;
   }, []);
 
-  // Save spots
   useEffect(() => {
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(spots));
   }, [spots]);
 
-  /* ---------- UPDATED: Get color based on age AND tick ---------- */
-  const getPinColor = (spot: ParkingSpot): string => {
-    const now = Date.now();
-    const ageInSeconds = Math.floor((now - spot.createdAt) / 1000);
-    
-    // Emulator-friendly color calculation (depends on age AND tick)
-    if (ageInSeconds < 10) {
-      return spot.type === "free" ? "#00FF00" : "#0000FF"; // Bright colors
-    } else if (ageInSeconds < 20) {
-      return spot.type === "free" ? "#FFFF00" : "#FF00FF"; // Yellow/Magenta
-    } else if (ageInSeconds < 30) {
-      return spot.type === "free" ? "#FFA500" : "#FF1493"; // Orange/Hot Pink
-    } else {
-      return spot.type === "free" ? "#FF0000" : "#8B0000"; // Red/Dark Red
-    }
-  };
-
+  /* ---------- HANDLERS ---------- */
   const handleMapLongPress = (event: MapPressEvent) => {
     const { latitude, longitude } = event.nativeEvent.coordinate;
     setPendingCoord({ latitude, longitude });
@@ -153,38 +124,31 @@ export default function MapScreen() {
 
   const saveSpot = async () => {
     if (!pendingCoord) return;
-
-    if (spotType === "paid" && rate.trim() === "") {
-      Alert.alert("Missing rate", "Please enter a rate for paid parking.");
-      return;
-    }
+    const timestamp = Date.now();
 
     const newSpot: ParkingSpot = {
-      id: `spot-${Date.now()}-${Math.random()}`,
+      id: `spot-${timestamp}-${Math.random()}`,
       latitude: pendingCoord.latitude,
       longitude: pendingCoord.longitude,
       type: spotType,
       rate: spotType === "paid" ? rate.trim() : undefined,
-      createdAt: Date.now(),
+      createdAt: timestamp,
       version: 0,
     };
 
-    console.log(`Created new spot at ${new Date().toLocaleTimeString()}`);
     setSpots((prev) => [...prev, newSpot]);
     closeModal();
 
-    // Added Firestore save for parking reports
     try {
-    const docId = await createParkingReport({
-      latitude: newSpot.latitude,
-      longitude: newSpot.longitude,
-      type: newSpot.type,
-      rate: newSpot.rate,
-    });
-     console.log("Saved to Firestore docId:", docId);
-    } catch (e: any) {
-    console.log("Firestore write failed:", e?.message ?? e);
-    Alert.alert("Saved locally, but cloud save failed", e?.message ?? "Check Firestore rules/auth.");
+      await createParkingReport({
+        latitude: newSpot.latitude,
+        longitude: newSpot.longitude,
+        type: newSpot.type,
+        rate: newSpot.rate,
+        createdAt: timestamp, // Ensure we send the timestamp to Firestore
+      });
+    } catch (e) {
+      console.log("Cloud save failed");
     }
   };
 
@@ -195,185 +159,99 @@ export default function MapScreen() {
   };
 
   const confirmRemoveSpot = (id: string) => {
-    Alert.alert(
-      "Remove parking spot?",
-      "This spot will be permanently removed.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Remove",
-          style: "destructive",
-          onPress: () =>
-            setSpots((prev) => prev.filter((spot) => spot.id !== id)),
-        },
-      ]
-    );
+    Alert.alert("Remove Spot?", "Permanently remove this marker?", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Remove", style: "destructive", onPress: () => setSpots(prev => prev.filter(s => s.id !== id)) },
+    ]);
   };
 
-  /* ---------- FORCE COLOR UPDATE FOR EMULATOR ---------- */
-  const forceColorUpdate = () => {
-    console.log("Manually forcing color update");
-    
-    // Increment version for ALL spots - this creates new Markers
-    setSpots(prev => {
-      if (prev.length === 0) return prev;
-      
-      return prev.map(spot => ({
-        ...spot,
-        version: spot.version + 1
-      }));
-    });
-    
-    // Also increment tick to force re-render
-    setTick(prev => prev + 1);
-  };
-
-  if (error) {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.errorText}>{error}</Text>
-      </View>
-    );
-  }
-
-  if (!region) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color="#007AFF" />
-        <Text style={{ marginTop: 8 }}>Getting location…</Text>
-      </View>
-    );
-  }
+  if (error) return <View style={styles.center}><Text style={styles.errorText}>{error}</Text></View>;
+  if (!region) return <View style={styles.center}><ActivityIndicator size="large" color="#007AFF" /><Text>Locating...</Text></View>;
 
   return (
     <View style={styles.container}>
       <MapView
         ref={mapRef}
         style={styles.map}
-        region={region}
+        initialRegion={region}
         showsUserLocation
         onLongPress={handleMapLongPress}
       >
-        {/* KEY: Use version in key to force new Marker */}
+        {/* LOCAL SPOTS */}
         {spots.map((spot) => {
-          const pinColor = getPinColor(spot);
-          const ageInSeconds = Math.floor((Date.now() - spot.createdAt) / 1000);
-          
+          const color = getPinColor(spot.createdAt);
+          const age = Math.floor((Date.now() - getTimeInMillis(spot.createdAt)) / 1000);
           return (
             <Marker
-              key={`${spot.id}-v${spot.version}-t${tick}`} // TRIPLE KEY FOR EMULATOR
-              coordinate={{
-                latitude: spot.latitude,
-                longitude: spot.longitude,
-              }}
-              pinColor={pinColor}
-              title={spot.type === "free" ? "Free Parking" : `Paid: ${spot.rate}`}
-              description={`Age: ${ageInSeconds}s • Tap to remove`}
+              key={`${spot.id}-v${spot.version}-t${tick}`}
+              coordinate={{ latitude: spot.latitude, longitude: spot.longitude }}
               onCalloutPress={() => confirmRemoveSpot(spot.id)}
-            />
+            >
+              <View style={[styles.customPin, { backgroundColor: color }]}>
+                <Text style={styles.pinText}>{spot.type === "free" ? "F" : "$"}</Text>
+              </View>
+              <Callout>
+                <View style={styles.callout}>
+                  <Text style={styles.calloutTitle}>{spot.type === "free" ? "Free Spot" : `Paid: ${spot.rate}`}</Text>
+                  <Text>Age: {age}s (Local)</Text>
+                  <Text style={styles.removeHint}>Tap to Remove</Text>
+                </View>
+              </Callout>
+            </Marker>
           );
         })}
 
-         {/* --- Cloud (Firestore) markers: other users' reports --- */}
+        {/* CLOUD REPORTS */}
         {cloudReports
-        .filter((r) => r.status !== "resolved")
-        .filter((r) => r.userId !== FIREBASE_AUTH.currentUser?.uid) // remove this line if you want to see your own too
-        .map((r) => (
-        <Marker
-          key={`cloud-${r.id}`}
-          coordinate={{ latitude: r.latitude, longitude: r.longitude }}
-          title={r.type === "free" ? "Free Parking (Reported)" : "Paid Parking (Reported)"}
-          description={r.type === "paid" ? `Rate: ${r.rate ?? ""}` : ""}
-          pinColor={r.type === "free" ? "green" : "blue"} // optional
-        />
-    ))}
+          .filter((r) => r.userId !== FIREBASE_AUTH.currentUser?.uid) // Only others
+          .map((r) => {
+            const color = getPinColor(r.createdAt);
+            const age = Math.floor((Date.now() - getTimeInMillis(r.createdAt)) / 1000);
+            return (
+              <Marker
+                key={`cloud-${r.id}-t${tick}`}
+                coordinate={{ latitude: r.latitude, longitude: r.longitude }}
+              >
+                <View style={[styles.customPin, { backgroundColor: color, opacity: 0.8 }]}>
+                  <Text style={styles.pinText}>{r.type === "free" ? "F" : "$"}</Text>
+                </View>
+                <Callout>
+                  <View style={styles.callout}>
+                    <Text style={styles.calloutTitle}>Other Driver's Report</Text>
+                    <Text>{r.type === "free" ? "Free Parking" : `Paid: ${r.rate}`}</Text>
+                    <Text>Age: {age}s</Text>
+                  </View>
+                </Callout>
+              </Marker>
+            );
+          })}
       </MapView>
 
-      {/* CONTROL PANEL */}
-      <View style={styles.controlPanel}>
-        <TouchableOpacity 
-          style={styles.testButton}
-          onPress={forceColorUpdate}
-        >
-          <Text style={styles.testButtonText}>Parking Finder</Text>
-        </TouchableOpacity>
-        
-        <View style={styles.infoPanel}>
-          <Text style={styles.infoText}>Pins: {spots.length}</Text>
-          <Text style={styles.infoText}>Tick: {tick}</Text>
-          <Text style={styles.infoText}>Time: {new Date().toLocaleTimeString()}</Text>
-        </View>
-      </View>
-
-      {/* COLOR PROGRESSION GUIDE */}
       <View style={styles.colorGuide}>
-        <Text style={styles.guideTitle}>Color Progression (Every 10s):</Text>
+        <Text style={styles.guideTitle}>Freshness (0s → 30s+)</Text>
         <View style={styles.colorRow}>
           <View style={[styles.colorDot, { backgroundColor: '#00FF00' }]} />
-          <Text style={styles.guideText}>0-10s</Text>
           <View style={[styles.colorDot, { backgroundColor: '#FFFF00' }]} />
-          <Text style={styles.guideText}>10-20s</Text>
           <View style={[styles.colorDot, { backgroundColor: '#FFA500' }]} />
-          <Text style={styles.guideText}>20-30s</Text>
           <View style={[styles.colorDot, { backgroundColor: '#FF0000' }]} />
-          <Text style={styles.guideText}>30s+</Text>
         </View>
       </View>
 
-      {/* MODAL */}
-      <Modal 
-        visible={showModal} 
-        transparent 
-        animationType="fade"
-        onRequestClose={closeModal}
-      >
-        <KeyboardAvoidingView 
-          behavior={Platform.OS === "ios" ? "padding" : "height"}
-          style={styles.modalOverlay}
-        >
+      <Modal visible={showModal} transparent animationType="slide">
+        <KeyboardAvoidingView behavior="padding" style={styles.modalOverlay}>
           <View style={styles.modal}>
-            <Text style={styles.modalTitle}>Add Parking Spot</Text>
-            <Text style={styles.modalSubtitle}>Emulator Test Mode</Text>
-
+            <Text style={styles.modalTitle}>New Parking Spot</Text>
             <View style={styles.typeRow}>
-              <TouchableOpacity
-                style={[
-                  styles.typeButton,
-                  spotType === "free" && styles.freeSelected,
-                ]}
-                onPress={() => setSpotType("free")}
-              >
-                <Text style={styles.typeText}>Free</Text>
+              <TouchableOpacity style={[styles.typeButton, spotType === "free" && styles.freeSelected]} onPress={() => setSpotType("free")}>
+                <Text>Free</Text>
               </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[
-                  styles.typeButton,
-                  spotType === "paid" && styles.paidSelected,
-                ]}
-                onPress={() => setSpotType("paid")}
-              >
-                <Text style={styles.typeText}>Paid</Text>
+              <TouchableOpacity style={[styles.typeButton, spotType === "paid" && styles.paidSelected]} onPress={() => setSpotType("paid")}>
+                <Text>Paid</Text>
               </TouchableOpacity>
             </View>
-
-            {spotType === "paid" && (
-              <TextInput
-                placeholder="Rate (e.g. $2/hr)"
-                value={rate}
-                onChangeText={setRate}
-                style={styles.input}
-                autoFocus
-              />
-            )}
-
-            <TouchableOpacity style={styles.saveButton} onPress={saveSpot}>
-              <Text style={styles.saveText}>Save Spot</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.cancelButton} onPress={closeModal}>
-              <Text style={styles.cancelText}>Cancel</Text>
-            </TouchableOpacity>
+            {spotType === "paid" && <TextInput placeholder="Rate" value={rate} onChangeText={setRate} style={styles.input} />}
+            <TouchableOpacity style={styles.saveButton} onPress={saveSpot}><Text style={styles.saveText}>Save</Text></TouchableOpacity>
+            <TouchableOpacity onPress={closeModal}><Text style={styles.cancelText}>Cancel</Text></TouchableOpacity>
           </View>
         </KeyboardAvoidingView>
       </Modal>
@@ -384,158 +262,30 @@ export default function MapScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   map: { flex: 1 },
-  center: { flex: 1, alignItems: "center", justifyContent: "center" },
-  errorText: { 
-    color: "#f44336", 
-    fontSize: 16, 
-    textAlign: "center",
-    paddingHorizontal: 20,
+  center: { flex: 1, justifyContent: "center", alignItems: "center" },
+  errorText: { color: "red" },
+  customPin: {
+    width: 38, height: 38, borderRadius: 19, borderWidth: 2, borderColor: 'white',
+    justifyContent: 'center', alignItems: 'center', elevation: 5,
+    shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 3,
   },
-  
-  // Control Panel
-  controlPanel: {
-    position: "absolute",
-    top: 10,
-    left: 10,
-    right: 10,
-    alignItems: "center",
-  },
-  testButton: {
-    backgroundColor: "#FF5722",
-    padding: 10,
-    borderRadius: 8,
-    marginBottom: 5,
-    width: "80%",
-    alignItems: "center",
-  },
-  testButtonText: {
-    color: "white",
-    fontWeight: "bold",
-    fontSize: 14,
-  },
-  infoPanel: {
-    backgroundColor: "rgba(255,255,255,0.9)",
-    padding: 8,
-    borderRadius: 6,
-    flexDirection: "row",
-    justifyContent: "space-around",
-    width: "100%",
-  },
-  infoText: {
-    fontSize: 12,
-    color: "#333",
-    fontWeight: "600",
-  },
-  
-  // Color Guide
-  colorGuide: {
-    position: "absolute",
-    bottom: 10,
-    left: 10,
-    right: 10,
-    backgroundColor: "rgba(255,255,255,0.95)",
-    padding: 10,
-    borderRadius: 8,
-    borderWidth: 2,
-    borderColor: "#4CAF50",
-  },
-  guideTitle: {
-    fontSize: 14,
-    fontWeight: "bold",
-    color: "#333",
-    textAlign: "center",
-    marginBottom: 5,
-  },
-  colorRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-around",
-  },
-  colorDot: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    marginHorizontal: 2,
-  },
-  guideText: {
-    fontSize: 10,
-    color: "#666",
-  },
-  
-  // Modal styles
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.6)",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  modal: {
-    width: "80%",
-    backgroundColor: "white",
-    padding: 20,
-    borderRadius: 12,
-    elevation: 5,
-  },
-  modalTitle: {
-    fontSize: 20,
-    fontWeight: "bold",
-    marginBottom: 5,
-    textAlign: "center",
-  },
-  modalSubtitle: {
-    fontSize: 12,
-    color: "#666",
-    marginBottom: 20,
-    textAlign: "center",
-  },
-  typeRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: 20,
-  },
-  typeButton: {
-    paddingVertical: 12,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#ddd",
-    width: "48%",
-    alignItems: "center",
-  },
-  typeText: { fontWeight: "600" },
-  freeSelected: {
-    backgroundColor: "#e8f5e9",
-    borderColor: "#4caf50",
-  },
-  paidSelected: {
-    backgroundColor: "#ffebee",
-    borderColor: "#f44336",
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: "#ddd",
-    padding: 12,
-    marginBottom: 20,
-    borderRadius: 8,
-    fontSize: 16,
-  },
-  saveButton: {
-    backgroundColor: "#007AFF",
-    padding: 14,
-    borderRadius: 8,
-    marginBottom: 10,
-  },
-  saveText: {
-    color: "white",
-    textAlign: "center",
-    fontWeight: "bold",
-    fontSize: 16,
-  },
-  cancelButton: {
-    padding: 10,
-  },
-  cancelText: {
-    color: "#666",
-    textAlign: "center",
-    fontSize: 14,
-  },
+  pinText: { color: 'white', fontWeight: 'bold' },
+  callout: { padding: 10, alignItems: 'center', minWidth: 120 },
+  calloutTitle: { fontWeight: 'bold', marginBottom: 5 },
+  removeHint: { color: 'red', fontSize: 10, marginTop: 5 },
+  colorGuide: { position: "absolute", bottom: 20, left: 20, backgroundColor: "white", padding: 10, borderRadius: 20, elevation: 5 },
+  guideTitle: { fontSize: 10, fontWeight: "bold", marginBottom: 5 },
+  colorRow: { flexDirection: "row", gap: 8 },
+  colorDot: { width: 12, height: 12, borderRadius: 6 },
+  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "center", alignItems: "center" },
+  modal: { width: "80%", backgroundColor: "white", padding: 20, borderRadius: 15 },
+  modalTitle: { fontSize: 18, fontWeight: "bold", textAlign: "center", marginBottom: 15 },
+  typeRow: { flexDirection: "row", justifyContent: "space-between", marginBottom: 15 },
+  typeButton: { padding: 10, borderWidth: 1, borderColor: "#ccc", borderRadius: 8, width: "45%", alignItems: "center" },
+  freeSelected: { backgroundColor: "#c8e6c9" },
+  paidSelected: { backgroundColor: "#ffcdd2" },
+  input: { borderWidth: 1, borderColor: "#ccc", padding: 10, borderRadius: 8, marginBottom: 15 },
+  saveButton: { backgroundColor: "#007AFF", padding: 12, borderRadius: 8 },
+  saveText: { color: "white", textAlign: "center", fontWeight: "bold" },
+  cancelText: { textAlign: "center", marginTop: 15, color: "#666" }
 });
