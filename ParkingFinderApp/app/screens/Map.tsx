@@ -16,6 +16,9 @@ import MapView, { Region, Marker, MapPressEvent } from "react-native-maps";
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createParkingReport } from "../../parkingReports";
+import { subscribeToParkingReports, ParkingReport } from "../../parkingReports";
+import { FIREBASE_AUTH } from "../../FirebaseConfig";
+
 
 type ParkingSpot = {
   id: string;
@@ -35,6 +38,7 @@ export default function MapScreen() {
   const [region, setRegion] = useState<Region | null>(null);
   const [spots, setSpots] = useState<ParkingSpot[]>([]);
   const [tick, setTick] = useState(0); // Simple counter to force updates
+  const [cloudReports, setCloudReports] = useState<ParkingReport[]>([]);
   
   // New-spot flow
   const [pendingCoord, setPendingCoord] = useState<{
@@ -105,6 +109,16 @@ export default function MapScreen() {
         setError("Failed to initialize");
       }
     })();
+  }, []);
+
+  // Live updates from Firestore (updates map whenever anyone adds a report)
+  useEffect(() => {
+  const unsub = subscribeToParkingReports(
+    (reports) => setCloudReports(reports),
+    (err) => console.log("subscribeToParkingReports error:", err?.message ?? err)
+  );
+
+  return unsub;
   }, []);
 
   // Save spots
@@ -259,6 +273,20 @@ export default function MapScreen() {
             />
           );
         })}
+
+         {/* --- Cloud (Firestore) markers: other users' reports --- */}
+        {cloudReports
+        .filter((r) => r.status !== "resolved")
+        .filter((r) => r.userId !== FIREBASE_AUTH.currentUser?.uid) // remove this line if you want to see your own too
+        .map((r) => (
+        <Marker
+          key={`cloud-${r.id}`}
+          coordinate={{ latitude: r.latitude, longitude: r.longitude }}
+          title={r.type === "free" ? "Free Parking (Reported)" : "Paid Parking (Reported)"}
+          description={r.type === "paid" ? `Rate: ${r.rate ?? ""}` : ""}
+          pinColor={r.type === "free" ? "green" : "blue"} // optional
+        />
+    ))}
       </MapView>
 
       {/* CONTROL PANEL */}
