@@ -170,10 +170,7 @@ export default function MapScreen() {
      console.log("Saved to Firestore docId:", docId);
     } catch (e: any) {
     console.log("Firestore write failed:", e?.message ?? e);
-    Alert.alert(
-      "Saved locally, but cloud save failed",
-      e?.message ?? "Check Firestore rules/auth."
-      );
+    Alert.alert("Saved locally, but cloud save failed", e?.message ?? "Check Firestore rules/auth.");
     }
   };
 
