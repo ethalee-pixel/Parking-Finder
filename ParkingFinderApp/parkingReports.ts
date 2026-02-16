@@ -1,5 +1,24 @@
-import { addDoc, collection, serverTimestamp, onSnapshot, orderBy, query, } from "firebase/firestore";
+import {
+  addDoc,
+  collection,
+  serverTimestamp,
+  onSnapshot,
+  orderBy,
+  query,
+  where,
+} from "firebase/firestore";
 import { FIRESTORE_DB, FIREBASE_AUTH } from "./FirebaseConfig";
+
+function sanitizeCoord(lat: any, lon: any) {
+  const latitude = typeof lat === "string" ? Number(lat) : lat;
+  const longitude = typeof lon === "string" ? Number(lon) : lon;
+
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  if (latitude < -90 || latitude > 90) return null;
+  if (longitude < -180 || longitude > 180) return null;
+
+  return { latitude, longitude };
+}
 
 export type ParkingReportCreate = {
   latitude: number;
@@ -25,12 +44,17 @@ export async function createParkingReport(data: ParkingReportCreate) {
     throw new Error("Not logged in (FIREBASE_AUTH.currentUser is null)");
   }
 
+  const coord = sanitizeCoord(data.latitude, data.longitude);
+  if (!coord) {
+    throw new Error(`Invalid coordinates: ${data.latitude}, ${data.longitude}`);
+  }
+
   const docRef = await addDoc(collection(FIRESTORE_DB, "parkingReports"), {
     userId: user.uid,
-    latitude: data.latitude,
-    longitude: data.longitude,
+    latitude: coord.latitude,
+    longitude: coord.longitude,
     type: data.type,
-    rate: data.type === "paid" ? data.rate ?? "" : null,
+    rate: data.type === "paid" ? (data.rate ?? "") : null,
     status: "open",
     createdAt: serverTimestamp(),
   });
@@ -41,32 +65,83 @@ export async function createParkingReport(data: ParkingReportCreate) {
 // Whenever someone adds/updates report -> you get latest list
 export function subscribeToParkingReports(
   onData: (reports: ParkingReport[]) => void,
-  onError?: (err: any) => void
+  onError?: (err: any) => void,
 ) {
   const q = query(
     collection(FIRESTORE_DB, "parkingReports"),
-    orderBy("createdAt", "desc")
+    orderBy("createdAt", "desc"),
   );
 
   return onSnapshot(
     q,
     (snap) => {
-      const reports: ParkingReport[] = snap.docs.map((d) => {
+      const reports: ParkingReport[] = [];
+
+      for (const d of snap.docs) {
         const data = d.data() as any;
-        return {
+
+        const coord = sanitizeCoord(data.latitude, data.longitude);
+        if (!coord) {
+          console.warn("Dropping bad parkingReport doc:", d.id, data);
+          continue;
+        }
+
+        reports.push({
           id: d.id,
           userId: data.userId,
-          latitude: data.latitude,
-          longitude: data.longitude,
+          latitude: coord.latitude,
+          longitude: coord.longitude,
           type: data.type,
           rate: data.rate ?? null,
           status: data.status ?? "open",
           createdAt: data.createdAt,
-        };
-      });
+        });
+      }
 
       onData(reports);
     },
-    (err) => onError?.(err)
+    (err) => onError?.(err),
+  );
+}
+
+export function subscribeToMyParkingReports(
+  onData: (reports: ParkingReport[]) => void,
+  onError?: (err: any) => void,
+) {
+  const user = FIREBASE_AUTH.currentUser;
+  if (!user) {
+    onData([]);
+    return () => {};
+  }
+
+  const q = query(
+    collection(FIRESTORE_DB, "parkingReports"),
+    where("userId", "==", user.uid),
+    orderBy("createdAt", "desc"),
+  );
+
+  return onSnapshot(
+    q,
+    (snap) => {
+      const reports: ParkingReport[] = [];
+      for (const d of snap.docs) {
+        const data = d.data() as any;
+        const coord = sanitizeCoord(data.latitude, data.longitude);
+        if (!coord) continue;
+
+        reports.push({
+          id: d.id,
+          userId: data.userId,
+          latitude: coord.latitude,
+          longitude: coord.longitude,
+          type: data.type,
+          rate: data.rate ?? null,
+          status: data.status ?? "open",
+          createdAt: data.createdAt,
+        });
+      }
+      onData(reports);
+    },
+    (err) => onError?.(err),
   );
 }
