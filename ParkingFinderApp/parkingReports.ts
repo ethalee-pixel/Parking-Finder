@@ -6,6 +6,8 @@ import {
   orderBy,
   query,
   where,
+  deleteDoc,
+  doc,
 } from "firebase/firestore";
 import { FIRESTORE_DB, FIREBASE_AUTH } from "./FirebaseConfig";
 
@@ -63,6 +65,19 @@ export async function createParkingReport(data: ParkingReportCreate) {
   });
 
   return docRef.id;
+}
+
+// Delete a parking report from Firestore
+export async function deleteParkingReport(reportId: string) {
+  const user = FIREBASE_AUTH.currentUser;
+  if (!user) {
+    throw new Error("Not logged in (FIREBASE_AUTH.currentUser is null)");
+  }
+
+  const docRef = doc(FIRESTORE_DB, "parkingReports", reportId);
+  await deleteDoc(docRef);
+  
+  console.log("Deleted parking report from Firestore:", reportId);
 }
 
 // Whenever someone adds/updates report -> you get latest list

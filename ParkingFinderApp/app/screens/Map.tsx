@@ -22,6 +22,7 @@ import {
   createParkingReport,
   subscribeToParkingReports,
   subscribeToMyParkingReports,
+  deleteParkingReport,
   ParkingReport,
 } from "../../parkingReports";
 import { FIREBASE_AUTH } from "../../FirebaseConfig";
@@ -45,6 +46,7 @@ type ParkingSpot = {
   createdAt: any;
   version: number;
   durationSeconds: number; // Total duration for this spot
+  firestoreId?: string; // Firebase document ID for deletion
 };
 
 const STORAGE_KEY = "@parking_spots";
@@ -332,19 +334,26 @@ export default function MapScreen() {
       durationSeconds: totalSeconds,
     };
 
-    setSpots((prev) => [...prev, newSpot]);
     closeModal();
 
     try {
-      await createParkingReport({
+      // Save to Firestore and get the document ID
+      const firestoreId = await createParkingReport({
         latitude: newSpot.latitude,
         longitude: newSpot.longitude,
         type: newSpot.type,
         rate: newSpot.rate,
-        durationSeconds: totalSeconds, // Add duration to cloud
+        durationSeconds: totalSeconds,
       });
+      
+      // Add the Firestore ID to the spot and save locally
+      newSpot.firestoreId = firestoreId;
+      setSpots((prev) => [...prev, newSpot]);
+      
     } catch (e) {
-      console.log("Cloud save failed", e);
+      
+      // Still add locally even if cloud save fails
+      setSpots((prev) => [...prev, newSpot]);
     }
   };
 
@@ -359,12 +368,38 @@ export default function MapScreen() {
   };
 
   const confirmRemoveSpot = (id: string) => {
+    
+    
+    // Find the spot to get its Firestore ID
+    const spot = spots.find((s) => s.id === id);
+    
     Alert.alert("Remove Spot?", "Permanently remove this marker?", [
       { text: "Cancel", style: "cancel" },
       {
         text: "Remove",
         style: "destructive",
-        onPress: () => setSpots((prev) => prev.filter((s) => s.id !== id)),
+        onPress: async () => {
+          
+          
+          // Remove from local state immediately
+          setSpots((prev) => {
+            const newSpots = prev.filter((s) => s.id !== id);
+            
+            return newSpots;
+          });
+          
+          // Delete from Firestore if we have the document ID
+          if (spot?.firestoreId) {
+            try {
+              await deleteParkingReport(spot.firestoreId);
+              
+            } catch (e) {
+              
+            }
+          } else {
+            
+          }
+        },
       },
     ]);
   };
@@ -391,11 +426,20 @@ export default function MapScreen() {
         key={`${isCloud ? 'cloud' : 'local'}-${data.id}`}
         coordinate={coord}
         tracksViewChanges={Platform.OS === 'ios' ? false : true}
+        onCalloutPress={() => {
+          
+          if (!isCloud) {
+            
+            confirmRemoveSpot(data.id);
+          } else {
+            
+          }
+        }}
       >
         <View style={[styles.customPin, { backgroundColor: color }]}>
           <Text style={styles.pinText}>{data.type === "free" ? "F" : "$"}</Text>
         </View>
-        <Callout tooltip={false} style={styles.calloutContainer}>
+        <Callout tooltip={false}>
           <View style={styles.callout} key={`callout-${data.id}-${tick}`}>
             <Text style={[styles.calloutTitle, warning && { color: "red" }]}>
               {warning
@@ -411,12 +455,9 @@ export default function MapScreen() {
               Time Left: {timeRemaining}
             </Text>
             {!isCloud && (
-              <TouchableOpacity 
-                style={styles.removeButton}
-                onPress={() => confirmRemoveSpot(data.id)}
-              >
-                <Text style={styles.removeButtonText}>Remove Spot</Text>
-              </TouchableOpacity>
+              <View style={styles.removeHintContainer}>
+                <Text style={styles.removeHint}>Tap to Remove</Text>
+              </View>
             )}
           </View>
         </Callout>
@@ -448,8 +489,23 @@ export default function MapScreen() {
         showsUserLocation
         onLongPress={handleMapLongPress}
       >
-        {spots.map((spot) => renderMarker(spot, false))}
-        {cloudReports.map((r) => renderMarker(r, true))}
+        {/* Render local spots (your spots that you control) */}
+        {spots.map((spot) => {
+          
+          return renderMarker(spot, false);
+        })}
+        
+        {/* Render cloud spots from ALL users (will sync deletions) */}
+        {cloudReports
+          .filter((r) => {
+            // Filter out spots that match our local spots (avoid duplicates)
+            const isDuplicate = spots.some((s) => s.firestoreId === r.id);
+            if (isDuplicate) {
+              
+            }
+            return !isDuplicate;
+          })
+          .map((r) => renderMarker(r, true))}
       </MapView>
 
       <View style={styles.colorGuide}>
@@ -692,27 +748,22 @@ const styles = StyleSheet.create({
     shadowRadius: 3,
   },
   pinText: { color: "white", fontWeight: "bold" },
-  calloutContainer: {
-    width: 160,
-  },
   callout: { 
     padding: 12, 
     minWidth: 150,
     backgroundColor: "white",
   },
   calloutTitle: { fontWeight: "bold", marginBottom: 5, fontSize: 14 },
-  removeHint: { color: "red", fontSize: 10, marginTop: 5 },
-  removeButton: {
+  removeHintContainer: {
     marginTop: 10,
-    backgroundColor: "#FF3B30",
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 6,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: "#eee",
   },
-  removeButtonText: {
-    color: "white",
+  removeHint: { 
+    color: "#FF3B30", 
+    fontSize: 12, 
     fontWeight: "600",
-    fontSize: 12,
     textAlign: "center",
   },
   colorGuide: {
