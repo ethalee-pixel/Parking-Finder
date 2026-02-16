@@ -25,6 +25,7 @@ export type ParkingReportCreate = {
   longitude: number;
   type: "free" | "paid";
   rate?: string;
+  durationSeconds?: number; // ADD: Custom duration for parking spot
 };
 
 export type ParkingReport = {
@@ -36,6 +37,7 @@ export type ParkingReport = {
   rate: string | null;
   status: "open" | "resolved";
   createdAt?: any;
+  durationSeconds?: number; // ADD: Custom duration for parking spot
 };
 
 export async function createParkingReport(data: ParkingReportCreate) {
@@ -57,6 +59,7 @@ export async function createParkingReport(data: ParkingReportCreate) {
     rate: data.type === "paid" ? (data.rate ?? "") : null,
     status: "open",
     createdAt: serverTimestamp(),
+    durationSeconds: data.durationSeconds ?? 30, // ADD: Store duration (default 30s)
   });
 
   return docRef.id;
@@ -95,6 +98,7 @@ export function subscribeToParkingReports(
           rate: data.rate ?? null,
           status: data.status ?? "open",
           createdAt: data.createdAt,
+          durationSeconds: data.durationSeconds ?? 30, // ADD: Include duration
         });
       }
 
@@ -138,6 +142,7 @@ export function subscribeToMyParkingReports(
           rate: data.rate ?? null,
           status: data.status ?? "open",
           createdAt: data.createdAt,
+          durationSeconds: data.durationSeconds ?? 30, // ADD: Include duration
         });
       }
       onData(reports);

@@ -11,14 +11,12 @@ import {
   KeyboardAvoidingView,
   Keyboard,
   FlatList,
+  ScrollView,
+  Platform,
 } from "react-native";
-import MapView, {
-  Region,
-  Marker,
-  MapPressEvent,
-  Callout,
-} from "react-native-maps";
+import MapView, { Region, Marker, Callout } from "react-native-maps";
 import * as Location from "expo-location";
+import * as Notifications from "expo-notifications";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   createParkingReport,
@@ -29,14 +27,24 @@ import {
 import { FIREBASE_AUTH } from "../../FirebaseConfig";
 import { onAuthStateChanged } from "firebase/auth";
 
+// Configure how notifications should be handled when app is in foreground
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+
 type ParkingSpot = {
   id: string;
   latitude: number;
   longitude: number;
   type: "free" | "paid";
   rate?: string;
-  createdAt: any; // Firestore Timestamp OR number
+  createdAt: any;
   version: number;
+  durationSeconds: number; // Total duration for this spot
 };
 
 const STORAGE_KEY = "@parking_spots";
@@ -46,8 +54,11 @@ export default function MapScreen() {
   const [error, setError] = useState<string | null>(null);
   const [region, setRegion] = useState<Region | null>(null);
   const [spots, setSpots] = useState<ParkingSpot[]>([]);
-  const [tick, setTick] = useState(0);
+  const [tick, setTick] = useState(0); // Updates every second
   const [cloudReports, setCloudReports] = useState<ParkingReport[]>([]);
+
+  // Track which IDs we have already alerted for so we don't spam
+  const alertedIds = useRef<Set<string>>(new Set());
 
   const [pendingCoord, setPendingCoord] = useState<{
     latitude: number;
@@ -57,17 +68,22 @@ export default function MapScreen() {
   const [rate, setRate] = useState("");
   const [showModal, setShowModal] = useState(false);
 
+  // Duration picker state
+  const [hours, setHours] = useState(0);
+  const [minutes, setMinutes] = useState(0);
+  const [seconds, setSeconds] = useState(30);
+
   // My reports history
   const [myReports, setMyReports] = useState<ParkingReport[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [uid, setUid] = useState<string | null>(
-    FIREBASE_AUTH.currentUser?.uid ?? null,
+    FIREBASE_AUTH.currentUser?.uid ?? null
   );
 
-  // ---- Coordinate firewall (prevents AIRMapMarker crashes) ----
+  // ---- Coordinate firewall ----
   const safeCoord = (
     lat: any,
-    lon: any,
+    lon: any
   ): { latitude: number; longitude: number } | null => {
     const latitude = typeof lat === "string" ? Number(lat) : lat;
     const longitude = typeof lon === "string" ? Number(lon) : lon;
@@ -79,35 +95,136 @@ export default function MapScreen() {
     return { latitude, longitude };
   };
 
-  /* ---------- HELPER: Parse Time for Firestore & JS ---------- */
+  /* ---------- HELPER: Time Calculations ---------- */
   const getTimeInMillis = (timeData: any) => {
     if (!timeData) return Date.now();
-    // Handle Firestore Timestamp {seconds, nanoseconds}
     if (timeData.seconds) return timeData.seconds * 1000;
-    // Handle standard JS Date/Number
     return typeof timeData === "number"
       ? timeData
       : new Date(timeData).getTime();
   };
 
-  const getPinColor = (createdAt: any): string => {
+  const getAgeInSeconds = (createdAt: any) => {
     const timeInMillis = getTimeInMillis(createdAt);
-    const ageInSeconds = Math.floor((Date.now() - timeInMillis) / 1000);
-
-    if (ageInSeconds < 10) return "#00FF00"; // Fresh (Green)
-    if (ageInSeconds < 20) return "#FFFF00"; // Stale (Yellow)
-    if (ageInSeconds < 30) return "#FFA500"; // Old (Orange)
-    return "#FF0000"; // Unreliable (Red)
+    return Math.floor((Date.now() - timeInMillis) / 1000);
   };
 
-  /* ---------- TIMERS & SUBSCRIPTIONS ---------- */
+  // Helper to format text like "1m 30s"
+  const formatDuration = (totalSeconds: number) => {
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    if (minutes > 0) return `${minutes}m ${seconds}s`;
+    return `${seconds}s`;
+  };
+
+  /* ---------- HELPER: Get Status for Rendering ---------- */
+  const getPinStatus = (createdAt: any, durationSeconds: number) => {
+    const age = getAgeInSeconds(createdAt);
+    const warningThreshold = Math.floor(durationSeconds * 0.9); // Warning at 90% of duration
+
+    if (age >= durationSeconds) {
+      return { color: null, expired: true, warning: false, age };
+    }
+    if (age >= warningThreshold) {
+      return { color: "#FF0000", expired: false, warning: true, age };
+    }
+    return { color: "#00FF00", expired: false, warning: false, age };
+  };
+
+  /* ---------- CHECK FOR WARNINGS & EXPIRATIONS ---------- */
+  const checkAlertsAndExpiration = async () => {
+    // Combine local spots and my cloud reports
+    const allMySpots = [...spots, ...myReports];
+
+    for (const spot of allMySpots) {
+      const age = getAgeInSeconds(spot.createdAt);
+      const duration = spot.durationSeconds || 30; // Default to 30s if not set
+      const warningThreshold = Math.floor(duration * 0.9); // Warning at 90%
+      
+      // If it's in the warning zone AND we haven't alerted yet
+      if (age >= warningThreshold && age < duration) {
+        if (!alertedIds.current.has(spot.id)) {
+          const timeRemaining = duration - age;
+          const spotLabel = spot.type === "free" ? "Free" : "Paid";
+          
+          // Send push notification instead of Alert
+          await Notifications.scheduleNotificationAsync({
+            content: {
+              title: "⚠️ Parking Spot Expiring Soon",
+              body: `Your ${spotLabel} parking spot will expire in ${formatDuration(timeRemaining)}!`,
+              sound: true,
+              priority: Notifications.AndroidNotificationPriority.HIGH,
+            },
+            trigger: null, // Show immediately
+          });
+
+          // Mark as alerted so we don't spam
+          alertedIds.current.add(spot.id);
+        }
+      }
+    }
+
+    // Remove expired LOCAL spots
+    setSpots((prev) => {
+      const stillValid = prev.filter((spot) => {
+        const age = getAgeInSeconds(spot.createdAt);
+        const duration = spot.durationSeconds || 30;
+        return age < duration;
+      });
+      
+      const removedCount = prev.length - stillValid.length;
+      if (removedCount > 0) {
+        // Send notification for expired spots
+        Notifications.scheduleNotificationAsync({
+          content: {
+            title: "Parking Spots Expired",
+            body: `${removedCount} parking spot(s) have expired and been removed.`,
+            sound: true,
+          },
+          trigger: null,
+        });
+      }
+      
+      return stillValid;
+    });
+  };
+
+  /* ---------- EFFECTS ---------- */
+
+  // Request notification permissions on mount
+  useEffect(() => {
+    (async () => {
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+      
+      if (existingStatus !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+      
+      if (finalStatus !== 'granted') {
+        console.log('Notification permissions not granted');
+      }
+    })();
+  }, []);
+
+  // The "Game Loop" - Ticks every 1 second
   useEffect(() => {
     const interval = setInterval(() => {
       setTick((prev) => prev + 1);
-    }, 5000);
+    }, 1000);
     return () => clearInterval(interval);
-  }, []);
+  }, []); // Empty deps - never recreate
 
+  // Separate effect to check alerts/expiration
+  useEffect(() => {
+    checkAlertsAndExpiration();
+  }, [tick]); // Only run when tick changes
+
+  // Standard Setup (Location, Auth, etc)
   useEffect(() => {
     (async () => {
       try {
@@ -121,38 +238,30 @@ export default function MapScreen() {
         if (savedSpots) {
           const parsed = JSON.parse(savedSpots);
           if (Array.isArray(parsed)) {
-            // Sanitize spots loaded from storage so one bad record never crashes the map
             const cleaned: ParkingSpot[] = parsed
               .map((spot: any) => {
                 const coord = safeCoord(spot.latitude, spot.longitude);
-                if (!coord) {
-                  console.warn("Dropping bad LOCAL spot from storage:", spot);
-                  return null;
-                }
+                if (!coord) return null;
                 return {
                   ...spot,
                   latitude: coord.latitude,
                   longitude: coord.longitude,
                   version: 0,
+                  durationSeconds: spot.durationSeconds || 30, // Default to 30s if not set
                 } as ParkingSpot;
               })
               .filter((s): s is ParkingSpot => s !== null);
-
             setSpots(cleaned);
-
-            // Optional but recommended: rewrite cleaned storage to prevent future crashes
-            await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(cleaned));
           }
         }
 
         const loc = await Location.getCurrentPositionAsync({});
-        const initialRegion = {
+        setRegion({
           latitude: loc.coords.latitude,
           longitude: loc.coords.longitude,
           latitudeDelta: 0.01,
           longitudeDelta: 0.01,
-        };
-        setRegion(initialRegion);
+        });
       } catch (err) {
         setError("Failed to initialize");
       }
@@ -162,7 +271,7 @@ export default function MapScreen() {
   useEffect(() => {
     const unsub = subscribeToParkingReports(
       (reports) => setCloudReports(reports),
-      (err) => console.log("Firestore error:", err),
+      (err) => console.log("Firestore error:", err)
     );
     return unsub;
   }, []);
@@ -172,12 +281,10 @@ export default function MapScreen() {
       setMyReports([]);
       return;
     }
-
     const unsub = subscribeToMyParkingReports(
       (reports) => setMyReports(reports),
-      (err) => console.log("My reports error:", err),
+      (err) => console.log("My reports error:", err)
     );
-
     return unsub;
   }, [uid]);
 
@@ -203,28 +310,38 @@ export default function MapScreen() {
 
   const saveSpot = async () => {
     if (!pendingCoord) return;
+    
+    const totalSeconds = hours * 3600 + minutes * 60 + seconds;
+    
+    if (totalSeconds === 0) {
+      Alert.alert("Invalid Duration", "Please set a duration greater than 0");
+      return;
+    }
+
     const timestamp = Date.now();
+    const id = `spot-${timestamp}-${Math.random()}`;
 
     const newSpot: ParkingSpot = {
-      id: `spot-${timestamp}-${Math.random()}`,
+      id,
       latitude: pendingCoord.latitude,
       longitude: pendingCoord.longitude,
       type: spotType,
       rate: spotType === "paid" ? rate.trim() : undefined,
       createdAt: timestamp,
       version: 0,
+      durationSeconds: totalSeconds,
     };
 
     setSpots((prev) => [...prev, newSpot]);
     closeModal();
 
     try {
-      // IMPORTANT: do NOT send createdAt here; parkingReports.ts uses serverTimestamp()
       await createParkingReport({
         latitude: newSpot.latitude,
         longitude: newSpot.longitude,
         type: newSpot.type,
         rate: newSpot.rate,
+        durationSeconds: totalSeconds, // Add duration to cloud
       });
     } catch (e) {
       console.log("Cloud save failed", e);
@@ -235,6 +352,10 @@ export default function MapScreen() {
     Keyboard.dismiss();
     setShowModal(false);
     setPendingCoord(null);
+    // Reset duration picker
+    setHours(0);
+    setMinutes(0);
+    setSeconds(30);
   };
 
   const confirmRemoveSpot = (id: string) => {
@@ -246,6 +367,61 @@ export default function MapScreen() {
         onPress: () => setSpots((prev) => prev.filter((s) => s.id !== id)),
       },
     ]);
+  };
+
+  /* ---------- RENDER HELPERS ---------- */
+  const renderMarker = (data: any, isCloud: boolean) => {
+    const coord = safeCoord(data.latitude, data.longitude);
+    if (!coord) return null;
+
+    const duration = data.durationSeconds || 30; // Default to 30s
+    const { color, expired, warning } = getPinStatus(data.createdAt, duration);
+
+    // If expired, DO NOT RENDER on map
+    if (expired) return null;
+
+    const age = getAgeInSeconds(data.createdAt);
+    const formattedTime = formatDuration(age);
+    const timeRemaining = formatDuration(duration - age);
+
+    // Stable key - never changes unless marker is added/removed
+    // The content inside will still update every second via tick state change
+    return (
+      <Marker
+        key={`${isCloud ? 'cloud' : 'local'}-${data.id}`}
+        coordinate={coord}
+        tracksViewChanges={Platform.OS === 'ios' ? false : true}
+      >
+        <View style={[styles.customPin, { backgroundColor: color }]}>
+          <Text style={styles.pinText}>{data.type === "free" ? "F" : "$"}</Text>
+        </View>
+        <Callout tooltip={false} style={styles.calloutContainer}>
+          <View style={styles.callout} key={`callout-${data.id}-${tick}`}>
+            <Text style={[styles.calloutTitle, warning && { color: "red" }]}>
+              {warning
+                ? "⚠️ Expiring Soon!"
+                : data.type === "free"
+                ? "Free Spot"
+                : `Paid: ${data.rate}`}
+            </Text>
+            <Text style={{ fontWeight: "600", color: "#333", marginTop: 4 }}>
+              Age: {formattedTime}
+            </Text>
+            <Text style={{ fontWeight: "600", color: "#666", fontSize: 12 }}>
+              Time Left: {timeRemaining}
+            </Text>
+            {!isCloud && (
+              <TouchableOpacity 
+                style={styles.removeButton}
+                onPress={() => confirmRemoveSpot(data.id)}
+              >
+                <Text style={styles.removeButtonText}>Remove Spot</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </Callout>
+      </Marker>
+    );
   };
 
   if (error)
@@ -272,93 +448,19 @@ export default function MapScreen() {
         showsUserLocation
         onLongPress={handleMapLongPress}
       >
-        {/* LOCAL SPOTS */}
-        {spots.map((spot) => {
-          const coord = safeCoord(spot.latitude, spot.longitude);
-          if (!coord) return null;
-
-          const color = getPinColor(spot.createdAt);
-          const age = Math.floor(
-            (Date.now() - getTimeInMillis(spot.createdAt)) / 1000,
-          );
-
-          return (
-            <Marker
-              key={`${spot.id}-v${spot.version}-t${tick}`}
-              coordinate={coord}
-              onCalloutPress={() => confirmRemoveSpot(spot.id)}
-            >
-              <View style={[styles.customPin, { backgroundColor: color }]}>
-                <Text style={styles.pinText}>
-                  {spot.type === "free" ? "F" : "$"}
-                </Text>
-              </View>
-              <Callout>
-                <View style={styles.callout}>
-                  <Text style={styles.calloutTitle}>
-                    {spot.type === "free" ? "Free Spot" : `Paid: ${spot.rate}`}
-                  </Text>
-                  <Text>Age: {age}s (Local)</Text>
-                  <Text style={styles.removeHint}>Tap to Remove</Text>
-                </View>
-              </Callout>
-            </Marker>
-          );
-        })}
-
-        {/* CLOUD REPORTS */}
-        {cloudReports
-          //.filter((r) => r.userId !== FIREBASE_AUTH.currentUser?.uid) // Only others
-          // When relaunching the app, it doesn't show my own local reports, so commented out the above line to show all reports including mine.
-          // likely want to differentiate own spots visually or allow toggling them on/off rather than hiding all of them
-          // figure out later
-          .map((r) => {
-            const coord = safeCoord(r.latitude, r.longitude);
-            if (!coord) {
-              console.warn("Dropping bad CLOUD report:", r);
-              return null;
-            }
-
-            const color = getPinColor(r.createdAt);
-            const age = Math.floor(
-              (Date.now() - getTimeInMillis(r.createdAt)) / 1000,
-            );
-
-            return (
-              <Marker key={`cloud-${r.id}-t${tick}`} coordinate={coord}>
-                <View
-                  style={[
-                    styles.customPin,
-                    { backgroundColor: color, opacity: 0.8 },
-                  ]}
-                >
-                  <Text style={styles.pinText}>
-                    {r.type === "free" ? "F" : "$"}
-                  </Text>
-                </View>
-                <Callout>
-                  <View style={styles.callout}>
-                    <Text style={styles.calloutTitle}>
-                      Other Driver&apos;s Report
-                    </Text>
-                    <Text>
-                      {r.type === "free" ? "Free Parking" : `Paid: ${r.rate}`}
-                    </Text>
-                    <Text>Age: {age}s</Text>
-                  </View>
-                </Callout>
-              </Marker>
-            );
-          })}
+        {spots.map((spot) => renderMarker(spot, false))}
+        {cloudReports.map((r) => renderMarker(r, true))}
       </MapView>
 
       <View style={styles.colorGuide}>
-        <Text style={styles.guideTitle}>Freshness (0s → 30s+)</Text>
+        <Text style={styles.guideTitle}>Status</Text>
         <View style={styles.colorRow}>
           <View style={[styles.colorDot, { backgroundColor: "#00FF00" }]} />
-          <View style={[styles.colorDot, { backgroundColor: "#FFFF00" }]} />
-          <View style={[styles.colorDot, { backgroundColor: "#FFA500" }]} />
+          <Text style={styles.guideText}>Active</Text>
+        </View>
+        <View style={styles.colorRow}>
           <View style={[styles.colorDot, { backgroundColor: "#FF0000" }]} />
+          <Text style={styles.guideText}>Expiring Soon</Text>
         </View>
       </View>
 
@@ -369,6 +471,7 @@ export default function MapScreen() {
         <Text style={styles.historyBtnText}>My History</Text>
       </TouchableOpacity>
 
+      {/* --- HISTORY MODAL --- */}
       <Modal visible={showHistory} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={[styles.modal, { maxHeight: "80%" }]}>
@@ -381,11 +484,18 @@ export default function MapScreen() {
                 <Text style={{ textAlign: "center" }}>No reports yet.</Text>
               }
               renderItem={({ item }) => {
-                const created = item.createdAt?.seconds
-                  ? new Date(item.createdAt.seconds * 1000)
-                  : item.createdAt
-                    ? new Date(item.createdAt)
-                    : null;
+                // Check if it expired relative to NOW
+                const ageSeconds = getAgeInSeconds(item.createdAt);
+                const duration = item.durationSeconds || 30;
+                const isExpired = ageSeconds >= duration;
+
+                // If expired, cap the time at duration. If active, show real time.
+                const durationText = isExpired 
+                    ? formatDuration(duration) 
+                    : formatDuration(ageSeconds);
+                
+                const statusLabel = isExpired ? "Expired" : "Active";
+                const statusColor = isExpired ? "#999" : "green";
 
                 const label =
                   item.type === "free"
@@ -394,24 +504,27 @@ export default function MapScreen() {
 
                 return (
                   <TouchableOpacity
-                    style={styles.historyRow}
+                    style={[styles.historyRow, isExpired && styles.historyRowExpired]}
+                    disabled={isExpired}
                     onPress={() => {
-                      mapRef.current?.animateToRegion(
-                        {
-                          latitude: item.latitude,
-                          longitude: item.longitude,
-                          latitudeDelta: 0.01,
-                          longitudeDelta: 0.01,
-                        },
-                        350,
-                      );
-                      setShowHistory(false);
+                      if(!isExpired) {
+                        mapRef.current?.animateToRegion({
+                            latitude: item.latitude,
+                            longitude: item.longitude,
+                            latitudeDelta: 0.01,
+                            longitudeDelta: 0.01,
+                        }, 350);
+                        setShowHistory(false);
+                      }
                     }}
                   >
-                    <Text style={styles.historyTitle}>{label}</Text>
+                    <View style={{flexDirection: 'row', justifyContent: 'space-between'}}>
+                        <Text style={[styles.historyTitle, isExpired && {color: '#666'}]}>{label}</Text>
+                        <Text style={{fontWeight: 'bold', color: statusColor}}>{statusLabel}</Text>
+                    </View>
+                    
                     <Text style={styles.historySub}>
-                      {created ? created.toLocaleString() : "Unknown time"} •{" "}
-                      {item.status}
+                       Alive for: {durationText}
                     </Text>
                   </TouchableOpacity>
                 );
@@ -425,6 +538,7 @@ export default function MapScreen() {
         </View>
       </Modal>
 
+      {/* --- NEW SPOT MODAL --- */}
       <Modal visible={showModal} transparent animationType="slide">
         <KeyboardAvoidingView behavior="padding" style={styles.modalOverlay}>
           <View style={styles.modal}>
@@ -461,6 +575,89 @@ export default function MapScreen() {
               />
             )}
 
+            {/* Duration Picker */}
+            <Text style={styles.durationLabel}>Duration:</Text>
+            <View style={styles.pickerContainer}>
+              <View style={styles.pickerColumn}>
+                <Text style={styles.pickerColumnLabel}>Hours</Text>
+                <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
+                  {Array.from({ length: 25 }, (_, i) => i).map((h) => (
+                    <TouchableOpacity
+                      key={`h-${h}`}
+                      style={[
+                        styles.pickerItem,
+                        hours === h && styles.pickerItemSelected,
+                      ]}
+                      onPress={() => setHours(h)}
+                    >
+                      <Text
+                        style={[
+                          styles.pickerItemText,
+                          hours === h && styles.pickerItemTextSelected,
+                        ]}
+                      >
+                        {h}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </View>
+
+              <View style={styles.pickerColumn}>
+                <Text style={styles.pickerColumnLabel}>Minutes</Text>
+                <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
+                  {Array.from({ length: 60 }, (_, i) => i).map((m) => (
+                    <TouchableOpacity
+                      key={`m-${m}`}
+                      style={[
+                        styles.pickerItem,
+                        minutes === m && styles.pickerItemSelected,
+                      ]}
+                      onPress={() => setMinutes(m)}
+                    >
+                      <Text
+                        style={[
+                          styles.pickerItemText,
+                          minutes === m && styles.pickerItemTextSelected,
+                        ]}
+                      >
+                        {m}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </View>
+
+              <View style={styles.pickerColumn}>
+                <Text style={styles.pickerColumnLabel}>Seconds</Text>
+                <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
+                  {Array.from({ length: 60 }, (_, i) => i).map((s) => (
+                    <TouchableOpacity
+                      key={`s-${s}`}
+                      style={[
+                        styles.pickerItem,
+                        seconds === s && styles.pickerItemSelected,
+                      ]}
+                      onPress={() => setSeconds(s)}
+                    >
+                      <Text
+                        style={[
+                          styles.pickerItemText,
+                          seconds === s && styles.pickerItemTextSelected,
+                        ]}
+                      >
+                        {s}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </View>
+            </View>
+
+            <Text style={styles.durationPreview}>
+              Total: {formatDuration(hours * 3600 + minutes * 60 + seconds)}
+            </Text>
+
             <TouchableOpacity style={styles.saveButton} onPress={saveSpot}>
               <Text style={styles.saveText}>Save</Text>
             </TouchableOpacity>
@@ -495,9 +692,29 @@ const styles = StyleSheet.create({
     shadowRadius: 3,
   },
   pinText: { color: "white", fontWeight: "bold" },
-  callout: { padding: 10, alignItems: "center", minWidth: 120 },
-  calloutTitle: { fontWeight: "bold", marginBottom: 5 },
+  calloutContainer: {
+    width: 160,
+  },
+  callout: { 
+    padding: 12, 
+    minWidth: 150,
+    backgroundColor: "white",
+  },
+  calloutTitle: { fontWeight: "bold", marginBottom: 5, fontSize: 14 },
   removeHint: { color: "red", fontSize: 10, marginTop: 5 },
+  removeButton: {
+    marginTop: 10,
+    backgroundColor: "#FF3B30",
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+  },
+  removeButtonText: {
+    color: "white",
+    fontWeight: "600",
+    fontSize: 12,
+    textAlign: "center",
+  },
   colorGuide: {
     position: "absolute",
     bottom: 20,
@@ -508,7 +725,8 @@ const styles = StyleSheet.create({
     elevation: 5,
   },
   guideTitle: { fontSize: 10, fontWeight: "bold", marginBottom: 5 },
-  colorRow: { flexDirection: "row", gap: 8 },
+  colorRow: { flexDirection: "row", alignItems: "center", marginBottom: 4 },
+  guideText: { fontSize: 10, marginLeft: 5 },
   colorDot: { width: 12, height: 12, borderRadius: 6 },
   modalOverlay: {
     flex: 1,
@@ -517,7 +735,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   modal: {
-    width: "80%",
+    width: "85%",
+    maxHeight: "85%",
     backgroundColor: "white",
     padding: 20,
     borderRadius: 15,
@@ -550,6 +769,60 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     marginBottom: 15,
   },
+  durationLabel: {
+    fontSize: 16,
+    fontWeight: "600",
+    marginBottom: 10,
+    marginTop: 5,
+  },
+  pickerContainer: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 15,
+    height: 150,
+  },
+  pickerColumn: {
+    flex: 1,
+    marginHorizontal: 5,
+  },
+  pickerColumnLabel: {
+    fontSize: 12,
+    fontWeight: "600",
+    textAlign: "center",
+    marginBottom: 5,
+    color: "#666",
+  },
+  picker: {
+    maxHeight: 120,
+    borderWidth: 1,
+    borderColor: "#ddd",
+    borderRadius: 8,
+    backgroundColor: "#f9f9f9",
+  },
+  pickerItem: {
+    padding: 8,
+    alignItems: "center",
+    borderBottomWidth: 1,
+    borderBottomColor: "#eee",
+  },
+  pickerItemSelected: {
+    backgroundColor: "#007AFF",
+  },
+  pickerItemText: {
+    fontSize: 16,
+    color: "#333",
+  },
+  pickerItemTextSelected: {
+    color: "white",
+    fontWeight: "bold",
+  },
+  durationPreview: {
+    textAlign: "center",
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#007AFF",
+    marginBottom: 15,
+  },
   saveButton: { backgroundColor: "#007AFF", padding: 12, borderRadius: 8 },
   saveText: { color: "white", textAlign: "center", fontWeight: "bold" },
   cancelText: { textAlign: "center", marginTop: 15, color: "#666" },
@@ -570,6 +843,10 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     padding: 12,
     marginBottom: 10,
+  },
+  historyRowExpired: {
+    backgroundColor: "#f5f5f5",
+    borderColor: "#ddd",
   },
   historyTitle: { fontWeight: "bold" },
   historySub: { color: "#666", marginTop: 4, fontSize: 12 },
