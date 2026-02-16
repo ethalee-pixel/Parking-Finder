@@ -8,6 +8,7 @@ import {
   where,
   deleteDoc,
   doc,
+  updateDoc
 } from "firebase/firestore";
 import { FIRESTORE_DB, FIREBASE_AUTH } from "./FirebaseConfig";
 
@@ -40,6 +41,8 @@ export type ParkingReport = {
   status: "open" | "resolved";
   createdAt?: any;
   durationSeconds?: number; // ADD: Custom duration for parking spot
+  resolvedAt?: any;
+  resolvedBy?: string;
 };
 
 export async function createParkingReport(data: ParkingReportCreate) {
@@ -78,6 +81,19 @@ export async function deleteParkingReport(reportId: string) {
   await deleteDoc(docRef);
   
   console.log("Deleted parking report from Firestore:", reportId);
+}
+
+
+export async function markReportTaken(reportId: string, uid: string) {
+  const docRef = doc(FIRESTORE_DB, "parkingReports", reportId);
+
+  await updateDoc(docRef, {
+    status: "resolved",
+    resolvedBy: uid,
+    resolvedAt: serverTimestamp(),
+  });
+
+  console.log("Marked parking report as resolved (taken):", reportId);
 }
 
 // Whenever someone adds/updates report -> you get latest list
@@ -158,6 +174,8 @@ export function subscribeToMyParkingReports(
           status: data.status ?? "open",
           createdAt: data.createdAt,
           durationSeconds: data.durationSeconds ?? 30, // ADD: Include duration
+          resolvedAt: data.resolvedAt,
+          resolvedBy: data.resolvedBy,
         });
       }
       onData(reports);

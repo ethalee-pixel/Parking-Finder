@@ -24,6 +24,7 @@ import {
   subscribeToMyParkingReports,
   deleteParkingReport,
   ParkingReport,
+  markReportTaken,
 } from "../../parkingReports";
 import { FIREBASE_AUTH } from "../../FirebaseConfig";
 import { onAuthStateChanged, signOut } from "firebase/auth";
@@ -50,6 +51,17 @@ type ParkingSpot = {
 };
 
 const STORAGE_KEY = "@parking_spots";
+
+const LAST_REPORTED_KEY = "@last_reported_spot";
+
+type LastReported = {
+  firestoreId: string;
+  latitude: number;
+  longitude: number;
+  createdAt: number;
+};
+
+
 
 export default function MapScreen() {
   const mapRef = useRef<MapView>(null);
@@ -93,6 +105,22 @@ export default function MapScreen() {
     isCloud: boolean;
   } | null>(null);
 
+  const [lastReported, setLastReported] = useState<LastReported | null>(null);
+  const [autoTakenBanner, setAutoTakenBanner] = useState<string | null>(null);
+  const locationSub = useRef<Location.LocationSubscription | null>(null);
+
+  type PosSample = { lat: number; lon: number; t: number };
+  const samplesRef = useRef<PosSample[]>([]);
+  const dwellStartRef = useRef<number | null>(null);
+  const alreadyAutoTakenRef = useRef<Set<string>>(new Set());
+
+  const ARRIVE_RADIUS_M = 25;
+  const DWELL_MS = 30_000;
+  const SAMPLE_WINDOW = 8;
+  const MOVEMENT_VARIANCE_M = 6;
+
+
+  
   // ---- Coordinate firewall ----
   const safeCoord = (
     lat: any,
@@ -265,6 +293,101 @@ export default function MapScreen() {
     });
   };
 
+
+
+
+
+
+    const toRad = (x: number) => (x * Math.PI) / 180;
+
+  const distanceMeters = (
+    aLat: number,
+    aLon: number,
+    bLat: number,
+    bLon: number
+  ) => {
+    const R = 6371000;
+    const dLat = toRad(bLat - aLat);
+    const dLon = toRad(bLon - aLon);
+    const lat1 = toRad(aLat);
+    const lat2 = toRad(bLat);
+
+    const s =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+
+    return 2 * R * Math.asin(Math.sqrt(s));
+  };
+
+    const autoMarkTaken = async (firestoreId: string) => {
+    if (!uid) return;
+
+    // prevent repeats
+    alreadyAutoTakenRef.current.add(firestoreId);
+
+    try {
+      await markReportTaken(firestoreId, uid);
+
+      setAutoTakenBanner("✅ Marked as TAKEN (you arrived and parked).");
+
+      // Optional: clear last reported so it won’t trigger again later
+      setLastReported(null);
+      await AsyncStorage.removeItem(LAST_REPORTED_KEY);
+    } catch (e) {
+      // allow retry if it failed
+      alreadyAutoTakenRef.current.delete(firestoreId);
+    }
+  };
+
+    const onLocationUpdate = (lat: number, lon: number) => {
+    if (!lastReported?.firestoreId) return;
+
+    // If we already auto-marked this report, do nothing
+    if (alreadyAutoTakenRef.current.has(lastReported.firestoreId)) return;
+
+    const now = Date.now();
+
+    // Rolling window of samples
+    samplesRef.current = [
+      ...samplesRef.current,
+      { lat, lon, t: now },
+    ].slice(-SAMPLE_WINDOW);
+
+    // Distance to last reported spot
+    const d = distanceMeters(
+      lat,
+      lon,
+      lastReported.latitude,
+      lastReported.longitude
+    );
+
+    const inside = d <= ARRIVE_RADIUS_M;
+
+    // Movement variance in the sample window
+    const base = samplesRef.current[0];
+    const maxDev = base
+      ? Math.max(
+          ...samplesRef.current.map((p) =>
+            distanceMeters(p.lat, p.lon, base.lat, base.lon)
+          )
+        )
+      : 9999;
+
+    const lowMovement = maxDev <= MOVEMENT_VARIANCE_M;
+
+    // Dwell logic
+    if (inside && lowMovement) {
+      if (dwellStartRef.current === null) dwellStartRef.current = now;
+
+      const dwell = now - dwellStartRef.current;
+      if (dwell >= DWELL_MS) {
+        autoMarkTaken(lastReported.firestoreId);
+      }
+    } else {
+      // reset if you walk away / move a lot
+      dwellStartRef.current = null;
+    }
+  };
   /* ---------- EFFECTS ---------- */
 
   // The "Game Loop" - Ticks every 1 second
@@ -279,6 +402,15 @@ export default function MapScreen() {
   useEffect(() => {
     checkAlertsAndExpiration();
   }, [tick]); // Only run when tick changes
+
+  // ✅ US 3.4 ADD: auto-hide banner
+  useEffect(() => {
+    if (!autoTakenBanner) return;
+    const t = setTimeout(() => setAutoTakenBanner(null), 4000);
+    return () => clearTimeout(t);
+  }, [autoTakenBanner]);
+
+
 
   // Standard Setup (Location, Auth, etc)
   useEffect(() => {
@@ -324,6 +456,14 @@ export default function MapScreen() {
             setSpots(cleaned);
           }
         }
+
+        const savedLast = await AsyncStorage.getItem(LAST_REPORTED_KEY);
+        if (savedLast) {
+          try {
+            setLastReported(JSON.parse(savedLast));
+          } catch {}
+        }
+
 
         // Try to get current location
         if (status === "granted") {
@@ -403,6 +543,39 @@ export default function MapScreen() {
     return unsub;
   }, []);
 
+  useEffect(() => {
+    let mounted = true;
+
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted") return;
+
+      // restart watcher whenever lastReported or uid changes
+      locationSub.current?.remove();
+      locationSub.current = null;
+
+      locationSub.current = await Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.Balanced,
+          timeInterval: 3000,
+          distanceInterval: 3,
+        },
+        (loc) => {
+          if (!mounted) return;
+          onLocationUpdate(loc.coords.latitude, loc.coords.longitude);
+        }
+      );
+    })();
+
+    return () => {
+      mounted = false;
+      locationSub.current?.remove();
+      locationSub.current = null;
+    };
+  }, [lastReported, uid]);
+
+
+
   /* ---------- HANDLERS ---------- */
   const handleMapLongPress = (event: any) => {
     const { latitude, longitude } = event.nativeEvent.coordinate;
@@ -412,56 +585,66 @@ export default function MapScreen() {
     setShowModal(true);
   };
 
-  const saveSpot = async () => {
-    if (!pendingCoord) return;
+const saveSpot = async () => {
+  if (!pendingCoord) return;
 
-    const totalSeconds = hours * 3600 + minutes * 60 + seconds;
+  const totalSeconds = hours * 3600 + minutes * 60 + seconds;
 
-    if (totalSeconds === 0) {
-      Alert.alert("Invalid Duration", "Please set a duration greater than 0");
-      return;
-    }
+  if (totalSeconds === 0) {
+    Alert.alert("Invalid Duration", "Please set a duration greater than 0");
+    return;
+  }
 
-    const timestamp = Date.now();
-    const id = `spot-${timestamp}-${Math.random()}`;
+  const timestamp = Date.now();
+  const id = `spot-${timestamp}-${Math.random()}`;
 
-    const newSpot: ParkingSpot = {
-      id,
-      latitude: pendingCoord.latitude,
-      longitude: pendingCoord.longitude,
-      type: spotType,
-      rate: spotType === "paid" ? rate.trim() : undefined,
-      createdAt: timestamp,
-      version: 0,
-      durationSeconds: totalSeconds,
-    };
-
-    closeModal();
-
-    // Schedule notification for this spot
-    await scheduleSpotNotification(id, totalSeconds, spotType);
-
-    try {
-      // Save to Firestore and get the document ID
-      const firestoreId = await createParkingReport({
-        latitude: newSpot.latitude,
-        longitude: newSpot.longitude,
-        type: newSpot.type,
-        rate: newSpot.rate,
-        durationSeconds: totalSeconds,
-      });
-
-      // Add the Firestore ID to the spot and save locally
-      newSpot.firestoreId = firestoreId;
-      setSpots((prev) => [...prev, newSpot]);
-      ////console.log("Saved spot with Firestore ID:", firestoreId);
-    } catch (e) {
-      ////console.log("Cloud save failed", e);
-      // Still add locally even if cloud save fails
-      setSpots((prev) => [...prev, newSpot]);
-    }
+  const newSpot: ParkingSpot = {
+    id,
+    latitude: pendingCoord.latitude,
+    longitude: pendingCoord.longitude,
+    type: spotType,
+    rate: spotType === "paid" ? rate.trim() : undefined,
+    createdAt: timestamp,
+    version: 0,
+    durationSeconds: totalSeconds,
   };
 
+  closeModal();
+
+  // Schedule notification for this spot
+  await scheduleSpotNotification(id, totalSeconds, spotType);
+
+  try {
+    // Save to Firestore and get the document ID
+    const firestoreId = await createParkingReport({
+      latitude: newSpot.latitude,
+      longitude: newSpot.longitude,
+      type: newSpot.type,
+      rate: newSpot.rate,
+      durationSeconds: totalSeconds,
+    });
+
+    // Add the Firestore ID to the spot and save locally
+    newSpot.firestoreId = firestoreId;
+    setSpots((prev) => [...prev, newSpot]);
+
+    // ✅ US 3.4 ADD: store last reported spot for auto-taken detection
+    const last: LastReported = {
+    firestoreId: string, //
+      latitude: newSpot.latitude,
+      longitude: newSpot.longitude,
+      createdAt: Date.now(),
+    };
+    setLastReported(last);
+    await AsyncStorage.setItem(LAST_REPORTED_KEY, JSON.stringify(last));
+  } catch (e) {
+    // Still add locally even if cloud save fails
+    setSpots((prev) => [...prev, newSpot]);
+  }
+};
+
+
+  
   const closeModal = () => {
     Keyboard.dismiss();
     setShowModal(false);
@@ -522,6 +705,9 @@ export default function MapScreen() {
   const renderMarker = (data: any, isCloud: boolean) => {
     const coord = safeCoord(data.latitude, data.longitude);
     if (!coord) return null;
+
+    if (isCloud && data.status === "resolved") return null;
+
 
     const duration = data.durationSeconds || 30; // Default to 30s
     const { color, expired, warning } = getPinStatus(data.createdAt, duration);
@@ -598,6 +784,13 @@ export default function MapScreen() {
       >
         <Text style={styles.historyBtnText}>Sign Out</Text>
       </TouchableOpacity>
+
+      {autoTakenBanner && (
+        <View style={styles.banner}>
+          <Text style={styles.bannerText}>{autoTakenBanner}</Text>
+        </View>
+      )}
+
 
       {/* --- MARKER INFO MODAL --- */}
       <Modal
@@ -1116,4 +1309,18 @@ const styles = StyleSheet.create({
   },
   historyTitle: { fontWeight: "bold" },
   historySub: { color: "#666", marginTop: 4, fontSize: 12 },
+    banner: {
+    position: "absolute",
+    top: 140,
+    left: 20,
+    right: 20,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: "white",
+    elevation: 6,
+  },
+  bannerText: {
+    textAlign: "center",
+    fontWeight: "600",
+  },
 });
