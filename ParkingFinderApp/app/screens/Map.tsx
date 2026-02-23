@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useMemo } from "react";
 import {
   View,
   Text,
@@ -14,7 +14,12 @@ import {
   ScrollView,
   Platform,
 } from "react-native";
-import MapView, { Region, Marker, Callout, CalloutSubview } from "react-native-maps";
+import MapView, {
+  Region,
+  Marker,
+  Callout,
+  CalloutSubview,
+} from "react-native-maps";
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
@@ -61,8 +66,6 @@ type LastReported = {
   createdAt: number;
 };
 
-
-
 export default function MapScreen() {
   const mapRef = useRef<MapView>(null);
   // Start with default region immediately (Santa Cruz, CA)
@@ -72,6 +75,13 @@ export default function MapScreen() {
     latitudeDelta: 0.01,
     longitudeDelta: 0.01,
   });
+  const [visibleRegion, setVisibleRegion] = useState<Region>({
+    latitude: 36.9741,
+    longitude: -122.0308,
+    latitudeDelta: 0.01,
+    longitudeDelta: 0.01,
+  });
+  const regionDebounceRef = useRef<NodeJS.Timeout | null>(null);
   const [spots, setSpots] = useState<ParkingSpot[]>([]);
   const [tick, setTick] = useState(0); // Updates every second
   const [cloudReports, setCloudReports] = useState<ParkingReport[]>([]);
@@ -95,9 +105,66 @@ export default function MapScreen() {
   // My reports history
   const [myReports, setMyReports] = useState<ParkingReport[]>([]);
   const [showHistory, setShowHistory] = useState(false);
-  const [uid, setUid] = useState<string | null>(
-    FIREBASE_AUTH.currentUser?.uid ?? null
+  const [historyType, setHistoryType] = useState<"all" | "free" | "paid">(
+    "all",
   );
+  const [historyStatus, setHistoryStatus] = useState<
+    "all" | "open" | "resolved"
+  >("all");
+  const [historyRange, setHistoryRange] = useState<
+    "all" | "24h" | "7d" | "30d"
+  >("all");
+  const [historySort, setHistorySort] = useState<
+    "newest" | "oldest" | "paidFirst" | "freeFirst"
+  >("newest");
+  const [uid, setUid] = useState<string | null>(
+    FIREBASE_AUTH.currentUser?.uid ?? null,
+  );
+
+  // Filtered history based on user selections
+  const filteredMyReports = useMemo(() => {
+    const now = Date.now();
+
+    const withinRange = (createdAt: any) => {
+      if (historyRange === "all") return true;
+      const t = getTimeInMillis(createdAt);
+      const ageMs = now - t;
+
+      if (historyRange === "24h") return ageMs <= 24 * 60 * 60 * 1000;
+      if (historyRange === "7d") return ageMs <= 7 * 24 * 60 * 60 * 1000;
+      if (historyRange === "30d") return ageMs <= 30 * 24 * 60 * 60 * 1000;
+      return true;
+    };
+
+    let arr = myReports.filter((r) => {
+      if (historyType !== "all" && r.type !== historyType) return false;
+      if (historyStatus !== "all" && r.status !== historyStatus) return false;
+      if (!withinRange(r.createdAt)) return false;
+      return true;
+    });
+
+    arr.sort((a, b) => {
+      const at = getTimeInMillis(a.createdAt);
+      const bt = getTimeInMillis(b.createdAt);
+
+      if (historySort === "newest") return bt - at;
+      if (historySort === "oldest") return at - bt;
+
+      if (historySort === "paidFirst") {
+        if (a.type !== b.type) return a.type === "paid" ? -1 : 1;
+        return bt - at;
+      }
+
+      if (historySort === "freeFirst") {
+        if (a.type !== b.type) return a.type === "free" ? -1 : 1;
+        return bt - at;
+      }
+
+      return bt - at;
+    });
+
+    return arr;
+  }, [myReports, historyType, historyStatus, historyRange, historySort]);
 
   // Selected marker modal
   const [selectedMarker, setSelectedMarker] = useState<{
@@ -119,12 +186,10 @@ export default function MapScreen() {
   const SAMPLE_WINDOW = 8;
   const MOVEMENT_VARIANCE_M = 9999;
 
-
-  
   // ---- Coordinate firewall ----
   const safeCoord = (
     lat: any,
-    lon: any
+    lon: any,
   ): { latitude: number; longitude: number } | null => {
     const latitude = typeof lat === "string" ? Number(lat) : lat;
     const longitude = typeof lon === "string" ? Number(lon) : lon;
@@ -137,13 +202,13 @@ export default function MapScreen() {
   };
 
   /* ---------- HELPER: Time Calculations ---------- */
-  const getTimeInMillis = (timeData: any) => {
+  function getTimeInMillis(timeData: any) {
     if (!timeData) return Date.now();
     if (timeData.seconds) return timeData.seconds * 1000;
     return typeof timeData === "number"
       ? timeData
       : new Date(timeData).getTime();
-  };
+  }
 
   const getAgeInSeconds = (createdAt: any) => {
     const timeInMillis = getTimeInMillis(createdAt);
@@ -163,29 +228,43 @@ export default function MapScreen() {
 
   // Request notification permissions
   const requestNotificationPermissions = async () => {
-    const { status: existingStatus } = await Notifications.getPermissionsAsync();
+    const { status: existingStatus } =
+      await Notifications.getPermissionsAsync();
     let finalStatus = existingStatus;
 
-    if (existingStatus !== 'granted') {
+    if (existingStatus !== "granted") {
       const { status } = await Notifications.requestPermissionsAsync();
       finalStatus = status;
     }
 
-    if (finalStatus !== 'granted') {
+    if (finalStatus !== "granted") {
       Alert.alert(
-        'Permission Required',
-        'Please enable notifications to get alerts when your parking spots are expiring.'
+        "Permission Required",
+        "Please enable notifications to get alerts when your parking spots are expiring.",
       );
       return false;
     }
     return true;
   };
 
+  // Calculate bounds of the current map region
+  function regionToBounds(r: Region) {
+    const minLat = r.latitude - r.latitudeDelta / 2;
+    const maxLat = r.latitude + r.latitudeDelta / 2;
+    const minLng = r.longitude - r.longitudeDelta / 2;
+    const maxLng = r.longitude + r.longitudeDelta / 2;
+
+    return { minLat, maxLat, minLng, maxLng };
+  }
   // Schedule notification for a parking spot
-  const scheduleSpotNotification = async (spotId: string, durationSeconds: number, spotType: string) => {
+  const scheduleSpotNotification = async (
+    spotId: string,
+    durationSeconds: number,
+    spotType: string,
+  ) => {
     // Only schedule actual push notifications on Android or in production builds
     // For iOS in Expo Go, rely on in-app Alert dialogs
-    if (Platform.OS === 'ios') {
+    if (Platform.OS === "ios") {
       //console.log('iOS: Using in-app alerts instead of notifications in Expo Go');
       return null;
     }
@@ -200,12 +279,12 @@ export default function MapScreen() {
     try {
       const notificationId = await Notifications.scheduleNotificationAsync({
         content: {
-          title: '⚠️ Parking Spot Expiring Soon',
-          body: `Your ${spotType === 'free' ? 'Free' : 'Paid'} parking spot will expire in ${formatDuration(timeRemaining)}!`,
+          title: "⚠️ Parking Spot Expiring Soon",
+          body: `Your ${spotType === "free" ? "Free" : "Paid"} parking spot will expire in ${formatDuration(timeRemaining)}!`,
           sound: true,
           vibrate: [0, 250, 250, 250], // Vibrate pattern: wait 0ms, vibrate 250ms, wait 250ms, vibrate 250ms
           priority: Notifications.AndroidNotificationPriority.HIGH,
-          ...(Platform.OS === 'android' && { channelId: 'parking-alerts' }),
+          ...(Platform.OS === "android" && { channelId: "parking-alerts" }),
         },
         trigger: {
           type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
@@ -260,7 +339,7 @@ export default function MapScreen() {
           Alert.alert(
             "⚠️ Parking Spot Expiring Soon",
             `Your ${spotLabel} parking spot will expire in ${formatDuration(timeRemaining)}!`,
-            [{ text: "OK" }]
+            [{ text: "OK" }],
           );
 
           // Mark as alerted so we don't spam
@@ -285,7 +364,7 @@ export default function MapScreen() {
         Alert.alert(
           "Parking Spots Expired",
           `${removedCount} parking spot(s) have expired and been removed.`,
-          [{ text: "OK" }]
+          [{ text: "OK" }],
         );
       }
 
@@ -293,18 +372,13 @@ export default function MapScreen() {
     });
   };
 
-
-
-
-
-
-    const toRad = (x: number) => (x * Math.PI) / 180;
+  const toRad = (x: number) => (x * Math.PI) / 180;
 
   const distanceMeters = (
     aLat: number,
     aLon: number,
     bLat: number,
-    bLon: number
+    bLon: number,
   ) => {
     const R = 6371000;
     const dLat = toRad(bLat - aLat);
@@ -319,7 +393,7 @@ export default function MapScreen() {
     return 2 * R * Math.asin(Math.sqrt(s));
   };
 
-    const autoMarkTaken = async (firestoreId: string) => {
+  const autoMarkTaken = async (firestoreId: string) => {
     if (!uid) return;
 
     // prevent repeats
@@ -333,15 +407,14 @@ export default function MapScreen() {
       // Optional: clear last reported so it won’t trigger again later
       setLastReported(null);
       await AsyncStorage.removeItem(LAST_REPORTED_KEY);
-    } catch (e:any) {
+    } catch (e: any) {
       console.log("markReportTaken failed:", e);
       Alert.alert("Auto-taken failed", e?.message ?? String(e));
       alreadyAutoTakenRef.current.delete(firestoreId);
     }
-    
   };
 
-    const onLocationUpdate = (lat: number, lon: number) => {
+  const onLocationUpdate = (lat: number, lon: number) => {
     if (!lastReported?.firestoreId) return;
 
     // If we already auto-marked this report, do nothing
@@ -350,17 +423,16 @@ export default function MapScreen() {
     const now = Date.now();
 
     // Rolling window of samples
-    samplesRef.current = [
-      ...samplesRef.current,
-      { lat, lon, t: now },
-    ].slice(-SAMPLE_WINDOW);
+    samplesRef.current = [...samplesRef.current, { lat, lon, t: now }].slice(
+      -SAMPLE_WINDOW,
+    );
 
     // Distance to last reported spot
     const d = distanceMeters(
       lat,
       lon,
       lastReported.latitude,
-      lastReported.longitude
+      lastReported.longitude,
     );
 
     const inside = d <= ARRIVE_RADIUS_M;
@@ -370,8 +442,8 @@ export default function MapScreen() {
     const maxDev = base
       ? Math.max(
           ...samplesRef.current.map((p) =>
-            distanceMeters(p.lat, p.lon, base.lat, base.lon)
-          )
+            distanceMeters(p.lat, p.lon, base.lat, base.lon),
+          ),
         )
       : 9999;
 
@@ -400,6 +472,12 @@ export default function MapScreen() {
     return () => clearInterval(interval);
   }, []); // Empty deps - never recreate
 
+  useEffect(() => {
+    return () => {
+      if (regionDebounceRef.current) clearTimeout(regionDebounceRef.current);
+    };
+  }, []);
+
   // Separate effect to check alerts/expiration
   useEffect(() => {
     checkAlertsAndExpiration();
@@ -412,8 +490,6 @@ export default function MapScreen() {
     return () => clearTimeout(t);
   }, [autoTakenBanner]);
 
-
-
   // Standard Setup (Location, Auth, etc)
   useEffect(() => {
     (async () => {
@@ -422,15 +498,15 @@ export default function MapScreen() {
         await requestNotificationPermissions();
 
         // Set up Android notification channel
-        if (Platform.OS === 'android') {
-          await Notifications.setNotificationChannelAsync('parking-alerts', {
-            name: 'Parking Alerts',
+        if (Platform.OS === "android") {
+          await Notifications.setNotificationChannelAsync("parking-alerts", {
+            name: "Parking Alerts",
             importance: Notifications.AndroidImportance.HIGH,
             vibrationPattern: [0, 250, 250, 250],
-            sound: 'default',
+            sound: "default",
             enableVibrate: true,
             enableLights: true,
-            lightColor: '#FF0000',
+            lightColor: "#FF0000",
           });
         }
 
@@ -465,7 +541,6 @@ export default function MapScreen() {
             setLastReported(JSON.parse(savedLast));
           } catch {}
         }
-
 
         // Try to get current location
         if (status === "granted") {
@@ -515,12 +590,16 @@ export default function MapScreen() {
   }, []);
 
   useEffect(() => {
+    const bounds = regionToBounds(visibleRegion);
+
     const unsub = subscribeToParkingReports(
+      bounds,
       (reports) => setCloudReports(reports),
-      (err) => console.log("Firestore error:", err)
+      (err) => console.log("Firestore error:", err),
     );
+
     return unsub;
-  }, []);
+  }, [visibleRegion]);
 
   useEffect(() => {
     if (!uid) {
@@ -529,7 +608,7 @@ export default function MapScreen() {
     }
     const unsub = subscribeToMyParkingReports(
       (reports) => setMyReports(reports),
-      (err) => console.log("My reports error:", err)
+      (err) => console.log("My reports error:", err),
     );
     return unsub;
   }, [uid]);
@@ -565,7 +644,7 @@ export default function MapScreen() {
         (loc) => {
           if (!mounted) return;
           onLocationUpdate(loc.coords.latitude, loc.coords.longitude);
-        }
+        },
       );
     })();
 
@@ -576,8 +655,6 @@ export default function MapScreen() {
     };
   }, [lastReported, uid]);
 
-
-
   /* ---------- HANDLERS ---------- */
   const handleMapLongPress = (event: any) => {
     const { latitude, longitude } = event.nativeEvent.coordinate;
@@ -586,74 +663,81 @@ export default function MapScreen() {
     setRate("");
     setShowModal(true);
   };
-
-const saveSpot = async () => {
-  if (!pendingCoord) return;
-
-  const totalSeconds = hours * 3600 + minutes * 60 + seconds;
-
-  if (totalSeconds === 0) {
-    Alert.alert("Invalid Duration", "Please set a duration greater than 0");
-    return;
-  }
-
-  const timestamp = Date.now();
-  const id = `spot-${timestamp}-${Math.random()}`;
-
-  const newSpot: ParkingSpot = {
-    id,
-    latitude: pendingCoord.latitude,
-    longitude: pendingCoord.longitude,
-    type: spotType,
-    rate: spotType === "paid" ? rate.trim() : undefined,
-    createdAt: timestamp,
-    version: 0,
-    durationSeconds: totalSeconds,
+  const handleRegionChangeComplete = (r: Region) => {
+    // Prevent spamming Firestore while the user is panning
+    if (regionDebounceRef.current) {
+      clearTimeout(regionDebounceRef.current);
+    }
+    regionDebounceRef.current = setTimeout(() => {
+      setVisibleRegion(r);
+    }, 400);
   };
 
-  closeModal();
+  const saveSpot = async () => {
+    if (!pendingCoord) return;
 
-  // Schedule notification for this spot
-  await scheduleSpotNotification(id, totalSeconds, spotType);
+    const totalSeconds = hours * 3600 + minutes * 60 + seconds;
 
-  try {
-    // Save to Firestore and get the document ID
-    const firestoreId = await createParkingReport({
-      latitude: newSpot.latitude,
-      longitude: newSpot.longitude,
-      type: newSpot.type,
-      rate: newSpot.rate,
+    if (totalSeconds === 0) {
+      Alert.alert("Invalid Duration", "Please set a duration greater than 0");
+      return;
+    }
+
+    const timestamp = Date.now();
+    const id = `spot-${timestamp}-${Math.random()}`;
+
+    const newSpot: ParkingSpot = {
+      id,
+      latitude: pendingCoord.latitude,
+      longitude: pendingCoord.longitude,
+      type: spotType,
+      rate: spotType === "paid" ? rate.trim() : undefined,
+      createdAt: timestamp,
+      version: 0,
       durationSeconds: totalSeconds,
-    });
-
-    console.log("CREATED FIRESTORE DOC:", firestoreId);
-
-    // Add the Firestore ID to the spot and save locally
-    newSpot.firestoreId = firestoreId;
-    setSpots((prev) => [...prev, newSpot]);
-
-    // ✅ US 3.4 ADD: store last reported spot for auto-taken detection
-    const last: LastReported = {
-      firestoreId, // use the variable you just got from createParkingReport
-      latitude: newSpot.latitude,
-      longitude: newSpot.longitude,
-      createdAt: Date.now(),
     };
-    setLastReported(last);
-    await AsyncStorage.setItem(LAST_REPORTED_KEY, JSON.stringify(last));
-} catch (e: any) {
-  console.log("createParkingReport failed:", e);
-  Alert.alert(
-    "Firestore save failed",
-    e?.message ? String(e.message) : JSON.stringify(e)
-  );
 
-  setSpots((prev) => [...prev, newSpot]);
-}
-};
+    closeModal();
 
+    // Schedule notification for this spot
+    await scheduleSpotNotification(id, totalSeconds, spotType);
 
-  
+    try {
+      // Save to Firestore and get the document ID
+      const firestoreId = await createParkingReport({
+        latitude: newSpot.latitude,
+        longitude: newSpot.longitude,
+        type: newSpot.type,
+        rate: newSpot.rate,
+        durationSeconds: totalSeconds,
+      });
+
+      console.log("CREATED FIRESTORE DOC:", firestoreId);
+
+      // Add the Firestore ID to the spot and save locally
+      newSpot.firestoreId = firestoreId;
+      setSpots((prev) => [...prev, newSpot]);
+
+      // ✅ US 3.4 ADD: store last reported spot for auto-taken detection
+      const last: LastReported = {
+        firestoreId, // use the variable you just got from createParkingReport
+        latitude: newSpot.latitude,
+        longitude: newSpot.longitude,
+        createdAt: Date.now(),
+      };
+      setLastReported(last);
+      await AsyncStorage.setItem(LAST_REPORTED_KEY, JSON.stringify(last));
+    } catch (e: any) {
+      console.log("createParkingReport failed:", e);
+      Alert.alert(
+        "Firestore save failed",
+        e?.message ? String(e.message) : JSON.stringify(e),
+      );
+
+      setSpots((prev) => [...prev, newSpot]);
+    }
+  };
+
   const closeModal = () => {
     Keyboard.dismiss();
     setShowModal(false);
@@ -717,7 +801,6 @@ const saveSpot = async () => {
 
     if (isCloud && data.status === "resolved") return null;
 
-
     const duration = data.durationSeconds || 30; // Default to 30s
     const { color, expired, warning } = getPinStatus(data.createdAt, duration);
 
@@ -727,7 +810,7 @@ const saveSpot = async () => {
     // Stable key - never changes unless marker is added/removed
     return (
       <Marker
-        key={`${isCloud ? 'cloud' : 'local'}-${data.id}`}
+        key={`${isCloud ? "cloud" : "local"}-${data.id}`}
         coordinate={coord}
         onPress={() => {
           setSelectedMarker({ data, isCloud });
@@ -748,6 +831,7 @@ const saveSpot = async () => {
         initialRegion={region}
         showsUserLocation
         onLongPress={handleMapLongPress}
+        onRegionChangeComplete={(r) => setVisibleRegion(r)}
       >
         {/* Render local spots (your spots that you control) */}
         {spots.map((spot) => {
@@ -800,7 +884,6 @@ const saveSpot = async () => {
         </View>
       )}
 
-
       {/* --- MARKER INFO MODAL --- */}
       <Modal
         visible={selectedMarker !== null}
@@ -814,53 +897,59 @@ const saveSpot = async () => {
           onPress={() => setSelectedMarker(null)}
         >
           <View style={styles.markerModalContent}>
-            {selectedMarker && (() => {
-              const data = selectedMarker.data;
-              const isCloud = selectedMarker.isCloud;
-              const duration = data.durationSeconds || 30;
-              const age = getAgeInSeconds(data.createdAt);
-              const formattedTime = formatDuration(age);
-              const timeRemaining = formatDuration(duration - age);
-              const warningThreshold = Math.floor(duration * 0.9);
-              const warning = age >= warningThreshold;
+            {selectedMarker &&
+              (() => {
+                const data = selectedMarker.data;
+                const isCloud = selectedMarker.isCloud;
+                const duration = data.durationSeconds || 30;
+                const age = getAgeInSeconds(data.createdAt);
+                const formattedTime = formatDuration(age);
+                const timeRemaining = formatDuration(duration - age);
+                const warningThreshold = Math.floor(duration * 0.9);
+                const warning = age >= warningThreshold;
 
-              return (
-                <>
-                  <Text style={[styles.markerModalTitle, warning && { color: "red" }]}>
-                    {warning
-                      ? "⚠️ Expiring Soon!"
-                      : data.type === "free"
-                      ? "Free Spot"
-                      : `Paid: ${data.rate}`}
-                  </Text>
-                  <Text style={styles.markerModalText}>
-                    Age: {formattedTime}
-                  </Text>
-                  <Text style={styles.markerModalText}>
-                    Time Left: {timeRemaining}
-                  </Text>
-
-                  {!isCloud && (
-                    <TouchableOpacity
-                      style={styles.removeButton}
-                      onPress={() => {
-                        setSelectedMarker(null);
-                        confirmRemoveSpot(data.id);
-                      }}
+                return (
+                  <>
+                    <Text
+                      style={[
+                        styles.markerModalTitle,
+                        warning && { color: "red" },
+                      ]}
                     >
-                      <Text style={styles.removeButtonText}>Remove Spot</Text>
-                    </TouchableOpacity>
-                  )}
+                      {warning
+                        ? "⚠️ Expiring Soon!"
+                        : data.type === "free"
+                          ? "Free Spot"
+                          : `Paid: ${data.rate}`}
+                    </Text>
+                    <Text style={styles.markerModalText}>
+                      Age: {formattedTime}
+                    </Text>
+                    <Text style={styles.markerModalText}>
+                      Time Left: {timeRemaining}
+                    </Text>
 
-                  <TouchableOpacity
-                    style={styles.closeButton}
-                    onPress={() => setSelectedMarker(null)}
-                  >
-                    <Text style={styles.closeButtonText}>Close</Text>
-                  </TouchableOpacity>
-                </>
-              );
-            })()}
+                    {!isCloud && (
+                      <TouchableOpacity
+                        style={styles.removeButton}
+                        onPress={() => {
+                          setSelectedMarker(null);
+                          confirmRemoveSpot(data.id);
+                        }}
+                      >
+                        <Text style={styles.removeButtonText}>Remove Spot</Text>
+                      </TouchableOpacity>
+                    )}
+
+                    <TouchableOpacity
+                      style={styles.closeButton}
+                      onPress={() => setSelectedMarker(null)}
+                    >
+                      <Text style={styles.closeButtonText}>Close</Text>
+                    </TouchableOpacity>
+                  </>
+                );
+              })()}
           </View>
         </TouchableOpacity>
       </Modal>
@@ -870,9 +959,151 @@ const saveSpot = async () => {
         <View style={styles.modalOverlay}>
           <View style={[styles.modal, { maxHeight: "80%" }]}>
             <Text style={styles.modalTitle}>My Report History</Text>
+            <View style={styles.filterBlock}>
+              <Text style={styles.filterLabel}>Type</Text>
+              <View style={styles.pillRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.pill,
+                    historyType === "all" && styles.pillActive,
+                  ]}
+                  onPress={() => setHistoryType("all")}
+                >
+                  <Text style={styles.pillText}>All</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.pill,
+                    historyType === "free" && styles.pillActive,
+                  ]}
+                  onPress={() => setHistoryType("free")}
+                >
+                  <Text style={styles.pillText}>Free</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.pill,
+                    historyType === "paid" && styles.pillActive,
+                  ]}
+                  onPress={() => setHistoryType("paid")}
+                >
+                  <Text style={styles.pillText}>Paid</Text>
+                </TouchableOpacity>
+              </View>
 
+              <Text style={styles.filterLabel}>Status</Text>
+              <View style={styles.pillRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.pill,
+                    historyStatus === "all" && styles.pillActive,
+                  ]}
+                  onPress={() => setHistoryStatus("all")}
+                >
+                  <Text style={styles.pillText}>All</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.pill,
+                    historyStatus === "open" && styles.pillActive,
+                  ]}
+                  onPress={() => setHistoryStatus("open")}
+                >
+                  <Text style={styles.pillText}>Open</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.pill,
+                    historyStatus === "resolved" && styles.pillActive,
+                  ]}
+                  onPress={() => setHistoryStatus("resolved")}
+                >
+                  <Text style={styles.pillText}>Resolved</Text>
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.filterLabel}>Range</Text>
+              <View style={styles.pillRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.pill,
+                    historyRange === "all" && styles.pillActive,
+                  ]}
+                  onPress={() => setHistoryRange("all")}
+                >
+                  <Text style={styles.pillText}>All</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.pill,
+                    historyRange === "24h" && styles.pillActive,
+                  ]}
+                  onPress={() => setHistoryRange("24h")}
+                >
+                  <Text style={styles.pillText}>24h</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.pill,
+                    historyRange === "7d" && styles.pillActive,
+                  ]}
+                  onPress={() => setHistoryRange("7d")}
+                >
+                  <Text style={styles.pillText}>7d</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.pill,
+                    historyRange === "30d" && styles.pillActive,
+                  ]}
+                  onPress={() => setHistoryRange("30d")}
+                >
+                  <Text style={styles.pillText}>30d</Text>
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.filterLabel}>Sort</Text>
+              <View style={styles.pillRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.pill,
+                    historySort === "newest" && styles.pillActive,
+                  ]}
+                  onPress={() => setHistorySort("newest")}
+                >
+                  <Text style={styles.pillText}>Newest</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.pill,
+                    historySort === "oldest" && styles.pillActive,
+                  ]}
+                  onPress={() => setHistorySort("oldest")}
+                >
+                  <Text style={styles.pillText}>Oldest</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.pill,
+                    historySort === "paidFirst" && styles.pillActive,
+                  ]}
+                  onPress={() => setHistorySort("paidFirst")}
+                >
+                  <Text style={styles.pillText}>Paid first</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.pill,
+                    historySort === "freeFirst" && styles.pillActive,
+                  ]}
+                  onPress={() => setHistorySort("freeFirst")}
+                >
+                  <Text style={styles.pillText}>Free first</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
             <FlatList
-              data={myReports}
+              data={filteredMyReports}
               keyExtractor={(item) => item.id}
               ListEmptyComponent={
                 <Text style={{ textAlign: "center" }}>No reports yet.</Text>
@@ -885,8 +1116,8 @@ const saveSpot = async () => {
 
                 // If expired, cap the time at duration. If active, show real time.
                 const durationText = isExpired
-                    ? formatDuration(duration)
-                    : formatDuration(ageSeconds);
+                  ? formatDuration(duration)
+                  : formatDuration(ageSeconds);
 
                 const statusLabel = isExpired ? "Expired" : "Active";
                 const statusColor = isExpired ? "#999" : "green";
@@ -898,27 +1129,47 @@ const saveSpot = async () => {
 
                 return (
                   <TouchableOpacity
-                    style={[styles.historyRow, isExpired && styles.historyRowExpired]}
+                    style={[
+                      styles.historyRow,
+                      isExpired && styles.historyRowExpired,
+                    ]}
                     disabled={isExpired}
                     onPress={() => {
-                      if(!isExpired) {
-                        mapRef.current?.animateToRegion({
+                      if (!isExpired) {
+                        mapRef.current?.animateToRegion(
+                          {
                             latitude: item.latitude,
                             longitude: item.longitude,
                             latitudeDelta: 0.01,
                             longitudeDelta: 0.01,
-                        }, 350);
+                          },
+                          350,
+                        );
                         setShowHistory(false);
                       }
                     }}
                   >
-                    <View style={{flexDirection: 'row', justifyContent: 'space-between'}}>
-                        <Text style={[styles.historyTitle, isExpired && {color: '#666'}]}>{label}</Text>
-                        <Text style={{fontWeight: 'bold', color: statusColor}}>{statusLabel}</Text>
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.historyTitle,
+                          isExpired && { color: "#666" },
+                        ]}
+                      >
+                        {label}
+                      </Text>
+                      <Text style={{ fontWeight: "bold", color: statusColor }}>
+                        {statusLabel}
+                      </Text>
                     </View>
 
                     <Text style={styles.historySub}>
-                       Alive for: {durationText}
+                      Alive for: {durationText}
                     </Text>
                   </TouchableOpacity>
                 );
@@ -974,7 +1225,10 @@ const saveSpot = async () => {
             <View style={styles.pickerContainer}>
               <View style={styles.pickerColumn}>
                 <Text style={styles.pickerColumnLabel}>Hours</Text>
-                <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
+                <ScrollView
+                  style={styles.picker}
+                  showsVerticalScrollIndicator={false}
+                >
                   {Array.from({ length: 25 }, (_, i) => i).map((h) => (
                     <TouchableOpacity
                       key={`h-${h}`}
@@ -999,7 +1253,10 @@ const saveSpot = async () => {
 
               <View style={styles.pickerColumn}>
                 <Text style={styles.pickerColumnLabel}>Minutes</Text>
-                <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
+                <ScrollView
+                  style={styles.picker}
+                  showsVerticalScrollIndicator={false}
+                >
                   {Array.from({ length: 60 }, (_, i) => i).map((m) => (
                     <TouchableOpacity
                       key={`m-${m}`}
@@ -1024,7 +1281,10 @@ const saveSpot = async () => {
 
               <View style={styles.pickerColumn}>
                 <Text style={styles.pickerColumnLabel}>Seconds</Text>
-                <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
+                <ScrollView
+                  style={styles.picker}
+                  showsVerticalScrollIndicator={false}
+                >
                   {Array.from({ length: 60 }, (_, i) => i).map((s) => (
                     <TouchableOpacity
                       key={`s-${s}`}
@@ -1318,7 +1578,7 @@ const styles = StyleSheet.create({
   },
   historyTitle: { fontWeight: "bold" },
   historySub: { color: "#666", marginTop: 4, fontSize: 12 },
-    banner: {
+  banner: {
     position: "absolute",
     top: 140,
     left: 20,
@@ -1332,4 +1592,16 @@ const styles = StyleSheet.create({
     textAlign: "center",
     fontWeight: "600",
   },
+  filterBlock: { marginBottom: 12 },
+  filterLabel: { fontWeight: "bold", marginTop: 8, marginBottom: 6 },
+  pillRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  pill: {
+    borderWidth: 1,
+    borderColor: "#ddd",
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+  },
+  pillActive: { backgroundColor: "#e8f0ff", borderColor: "#9bbcff" },
+  pillText: { fontSize: 12 },
 });
