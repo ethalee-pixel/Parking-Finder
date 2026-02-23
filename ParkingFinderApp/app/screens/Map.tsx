@@ -31,8 +31,9 @@ import {
   ParkingReport,
   markReportTaken,
 } from "../../parkingReports";
-import { FIREBASE_AUTH } from "../../FirebaseConfig";
+import { FIREBASE_AUTH, FIRESTORE_DB } from "../../FirebaseConfig";
 import { onAuthStateChanged, signOut } from "firebase/auth";
+import { doc, updateDoc } from "firebase/firestore";
 
 // Configure how notifications should be handled when app is in foreground
 Notifications.setNotificationHandler({
@@ -185,6 +186,82 @@ export default function MapScreen() {
   const DWELL_MS = 1000;
   const SAMPLE_WINDOW = 8;
   const MOVEMENT_VARIANCE_M = 9999;
+
+
+  // Undo window (30–60s recommended)
+  const UNDO_WINDOW_MS = 45_000; // 45 seconds
+  // Tracks an active undo opportunity for ONE auto-taken report at a time
+  const [undoState, setUndoState] = useState<{
+    reportId: string;
+    expiresAt: number;
+    isProcessing: boolean;
+  } | null>(null);
+
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showUndoBanner = (reportId: string) => {
+  // Clear any previous undo timeout
+    if (undoTimerRef.current) {
+      clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = null;
+  }
+
+    const expiresAt = Date.now() + UNDO_WINDOW_MS;
+    setUndoState({ reportId, expiresAt, isProcessing: false });
+
+  // Auto-hide after window expires
+    undoTimerRef.current = setTimeout(() => {
+      setUndoState(null);
+      undoTimerRef.current = null;
+    }, UNDO_WINDOW_MS);
+  };
+
+  const undoAutoTaken = async () => {
+    if (!undoState) return;
+
+    // Prevent undo after time window expires
+    if (Date.now() > undoState.expiresAt) {
+      setUndoState(null);
+      return;
+    }
+
+    // Prevent double taps
+    if (undoState.isProcessing) return;
+
+    setUndoState({ ...undoState, isProcessing: true });
+
+    try {
+      await updateDoc(doc(FIRESTORE_DB, "parkingReports", undoState.reportId), {
+        status: "open",
+        resolvedAt: null,
+        resolvedBy: null,
+      });
+
+      // Allow auto-taken to happen again later if needed
+      alreadyAutoTakenRef.current.delete(undoState.reportId);
+
+      // Remove banner
+      setUndoState(null);
+      if (undoTimerRef.current) {
+        clearTimeout(undoTimerRef.current);
+        undoTimerRef.current = null;
+      }
+    } catch (e: any) {
+      setUndoState({ ...undoState, isProcessing: false });
+      Alert.alert("Undo failed", e?.message ?? "Could not undo the auto-taken update.");
+    }
+  };
+
+  // Cleanup: undo timer (prevents setState after unmount)
+  useEffect(() => {
+    return () => {
+      if (undoTimerRef.current) {
+        clearTimeout(undoTimerRef.current);
+        undoTimerRef.current = null;
+      }
+    };
+  }, []);
+
 
   // ---- Coordinate firewall ----
   const safeCoord = (
@@ -402,6 +479,8 @@ export default function MapScreen() {
     try {
       await markReportTaken(firestoreId, uid);
 
+      showUndoBanner(firestoreId);
+
       setAutoTakenBanner("Marked as TAKEN (you arrived and parked).");
 
       // Optional: clear last reported so it won’t trigger again later
@@ -483,7 +562,7 @@ export default function MapScreen() {
     checkAlertsAndExpiration();
   }, [tick]); // Only run when tick changes
 
-  // ✅ US 3.4 ADD: auto-hide banner
+  // US 3.4 ADD: auto-hide banner
   useEffect(() => {
     if (!autoTakenBanner) return;
     const t = setTimeout(() => setAutoTakenBanner(null), 4000);
@@ -718,7 +797,7 @@ export default function MapScreen() {
       newSpot.firestoreId = firestoreId;
       setSpots((prev) => [...prev, newSpot]);
 
-      // ✅ US 3.4 ADD: store last reported spot for auto-taken detection
+      // US 3.4 ADD: store last reported spot for auto-taken detection
       const last: LastReported = {
         firestoreId, // use the variable you just got from createParkingReport
         latitude: newSpot.latitude,
@@ -851,6 +930,26 @@ export default function MapScreen() {
           })
           .map((r) => renderMarker(r, true))}
       </MapView>
+
+      {/* Undo banner for auto-marked taken reports */}
+      {undoState && (
+        <View style={styles.undoBanner}>
+          <Text style={styles.undoText}>
+            Marked as taken. Undo? (
+            {Math.max(0, Math.ceil((undoState.expiresAt - Date.now()) / 1000))}s)
+          </Text>
+
+          <TouchableOpacity
+            style={[styles.undoBtn, undoState.isProcessing && { opacity: 0.6 }]}
+            onPress={undoAutoTaken}
+            disabled={undoState.isProcessing}
+          >
+            <Text style={styles.undoBtnText}>
+              {undoState.isProcessing ? "Undoing..." : "UNDO"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+        )}
 
       <View style={styles.colorGuide}>
         <Text style={styles.guideTitle}>Status</Text>
@@ -1604,4 +1703,25 @@ const styles = StyleSheet.create({
   },
   pillActive: { backgroundColor: "#e8f0ff", borderColor: "#9bbcff" },
   pillText: { fontSize: 12 },
+  undoBanner: {
+    position: "absolute",
+    left: 16,
+    right: 16,
+    bottom: 24,
+    backgroundColor: "rgba(0,0,0,0.85)",
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  undoText: { color: "white", flex: 1, marginRight: 12 },
+  undoBtn: {
+    backgroundColor: "white",
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+  },
+  undoBtnText: { fontWeight: "800" },
 });
