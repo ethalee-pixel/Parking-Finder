@@ -114,10 +114,10 @@ export default function MapScreen() {
   const dwellStartRef = useRef<number | null>(null);
   const alreadyAutoTakenRef = useRef<Set<string>>(new Set());
 
-  const ARRIVE_RADIUS_M = 25;
-  const DWELL_MS = 30_000;
+  const ARRIVE_RADIUS_M = 1000000;
+  const DWELL_MS = 1000;
   const SAMPLE_WINDOW = 8;
-  const MOVEMENT_VARIANCE_M = 6;
+  const MOVEMENT_VARIANCE_M = 9999;
 
 
   
@@ -328,15 +328,17 @@ export default function MapScreen() {
     try {
       await markReportTaken(firestoreId, uid);
 
-      setAutoTakenBanner("✅ Marked as TAKEN (you arrived and parked).");
+      setAutoTakenBanner("Marked as TAKEN (you arrived and parked).");
 
       // Optional: clear last reported so it won’t trigger again later
       setLastReported(null);
       await AsyncStorage.removeItem(LAST_REPORTED_KEY);
-    } catch (e) {
-      // allow retry if it failed
+    } catch (e:any) {
+      console.log("markReportTaken failed:", e);
+      Alert.alert("Auto-taken failed", e?.message ?? String(e));
       alreadyAutoTakenRef.current.delete(firestoreId);
     }
+    
   };
 
     const onLocationUpdate = (lat: number, lon: number) => {
@@ -624,23 +626,30 @@ const saveSpot = async () => {
       durationSeconds: totalSeconds,
     });
 
+    console.log("CREATED FIRESTORE DOC:", firestoreId);
+
     // Add the Firestore ID to the spot and save locally
     newSpot.firestoreId = firestoreId;
     setSpots((prev) => [...prev, newSpot]);
 
     // ✅ US 3.4 ADD: store last reported spot for auto-taken detection
     const last: LastReported = {
-    firestoreId: string, //
+      firestoreId, // use the variable you just got from createParkingReport
       latitude: newSpot.latitude,
       longitude: newSpot.longitude,
       createdAt: Date.now(),
     };
     setLastReported(last);
     await AsyncStorage.setItem(LAST_REPORTED_KEY, JSON.stringify(last));
-  } catch (e) {
-    // Still add locally even if cloud save fails
-    setSpots((prev) => [...prev, newSpot]);
-  }
+} catch (e: any) {
+  console.log("createParkingReport failed:", e);
+  Alert.alert(
+    "Firestore save failed",
+    e?.message ? String(e.message) : JSON.stringify(e)
+  );
+
+  setSpots((prev) => [...prev, newSpot]);
+}
 };
 
 
