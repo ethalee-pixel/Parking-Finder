@@ -37,11 +37,16 @@ import { doc, updateDoc } from "firebase/firestore";
 
 // Configure how notifications should be handled when app is in foreground
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
+  handleNotification:
+    async (): Promise<Notifications.NotificationBehavior> => ({
+      shouldShowAlert: true,
+      shouldPlaySound: true,
+      shouldSetBadge: false,
+
+      // Required by newer expo-notifications types (mainly iOS)
+      shouldShowBanner: true,
+      shouldShowList: true,
+    }),
 });
 
 type ParkingSpot = {
@@ -69,6 +74,7 @@ type LastReported = {
 
 export default function MapScreen() {
   const mapRef = useRef<MapView>(null);
+  const didCenterOnUserRef = useRef(false);
   // Start with default region immediately (Santa Cruz, CA)
   const [region, setRegion] = useState<Region>({
     latitude: 36.9741,
@@ -187,7 +193,6 @@ export default function MapScreen() {
   const SAMPLE_WINDOW = 8;
   const MOVEMENT_VARIANCE_M = 9999;
 
-
   // Undo window (30–60s recommended)
   const UNDO_WINDOW_MS = 45_000; // 45 seconds
   // Tracks an active undo opportunity for ONE auto-taken report at a time
@@ -200,16 +205,16 @@ export default function MapScreen() {
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showUndoBanner = (reportId: string) => {
-  // Clear any previous undo timeout
+    // Clear any previous undo timeout
     if (undoTimerRef.current) {
       clearTimeout(undoTimerRef.current);
       undoTimerRef.current = null;
-  }
+    }
 
     const expiresAt = Date.now() + UNDO_WINDOW_MS;
     setUndoState({ reportId, expiresAt, isProcessing: false });
 
-  // Auto-hide after window expires
+    // Auto-hide after window expires
     undoTimerRef.current = setTimeout(() => {
       setUndoState(null);
       undoTimerRef.current = null;
@@ -248,7 +253,10 @@ export default function MapScreen() {
       }
     } catch (e: any) {
       setUndoState({ ...undoState, isProcessing: false });
-      Alert.alert("Undo failed", e?.message ?? "Could not undo the auto-taken update.");
+      Alert.alert(
+        "Undo failed",
+        e?.message ?? "Could not undo the auto-taken update.",
+      );
     }
   };
 
@@ -261,7 +269,6 @@ export default function MapScreen() {
       }
     };
   }, []);
-
 
   // ---- Coordinate firewall ----
   const safeCoord = (
@@ -379,10 +386,10 @@ export default function MapScreen() {
   /* ---------- HELPER: Get Status for Rendering ---------- */
   const getPinStatus = (createdAt: any, durationSeconds: number) => {
     const age = getAgeInSeconds(createdAt);
-    const warningThreshold = Math.floor(durationSeconds * 0.9); // Warning at 90% of duration
+    const warningThreshold = Math.floor(durationSeconds * 0.9);
 
     if (age >= durationSeconds) {
-      return { color: null, expired: true, warning: false, age };
+      return { color: "#999999", expired: true, warning: false, age }; // color won't be used because expired => not rendered
     }
     if (age >= warningThreshold) {
       return { color: "#FF0000", expired: false, warning: true, age };
@@ -625,15 +632,28 @@ export default function MapScreen() {
         if (status === "granted") {
           try {
             const loc = await Location.getCurrentPositionAsync({
-              accuracy: Location.Accuracy.Balanced,
-              timeInterval: 5000,
+              accuracy: Location.Accuracy.Highest,
             });
-            setRegion({
+
+            const userRegion: Region = {
               latitude: loc.coords.latitude,
               longitude: loc.coords.longitude,
               latitudeDelta: 0.01,
               longitudeDelta: 0.01,
-            });
+            };
+
+            setRegion(userRegion);
+            setVisibleRegion(userRegion);
+
+            // THIS actually moves the camera
+            if (!didCenterOnUserRef.current) {
+              didCenterOnUserRef.current = true;
+
+              // give MapView one render frame to exist
+              setTimeout(() => {
+                mapRef.current?.animateToRegion(userRegion, 700);
+              }, 80);
+            }
             ////console.log("Got location:", loc.coords.latitude, loc.coords.longitude);
           } catch (locError) {
             ////console.log("Failed to get current location, using default:", locError);
@@ -909,6 +929,8 @@ export default function MapScreen() {
         style={styles.map}
         initialRegion={region}
         showsUserLocation
+        showsMyLocationButton={true}
+        followsUserLocation={false}
         onLongPress={handleMapLongPress}
         onRegionChangeComplete={(r) => setVisibleRegion(r)}
       >
@@ -936,7 +958,8 @@ export default function MapScreen() {
         <View style={styles.undoBanner}>
           <Text style={styles.undoText}>
             Marked as taken. Undo? (
-            {Math.max(0, Math.ceil((undoState.expiresAt - Date.now()) / 1000))}s)
+            {Math.max(0, Math.ceil((undoState.expiresAt - Date.now()) / 1000))}
+            s)
           </Text>
 
           <TouchableOpacity
@@ -949,7 +972,7 @@ export default function MapScreen() {
             </Text>
           </TouchableOpacity>
         </View>
-        )}
+      )}
 
       <View style={styles.colorGuide}>
         <Text style={styles.guideTitle}>Status</Text>
