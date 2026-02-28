@@ -14,12 +14,7 @@ import {
   ScrollView,
   Platform,
 } from "react-native";
-import MapView, {
-  Region,
-  Marker,
-  Callout,
-  CalloutSubview,
-} from "react-native-maps";
+import MapView, { Region, Marker } from "react-native-maps";
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
@@ -62,7 +57,6 @@ type ParkingSpot = {
 };
 
 const STORAGE_KEY = "@parking_spots";
-
 const LAST_REPORTED_KEY = "@last_reported_spot";
 
 type LastReported = {
@@ -75,6 +69,7 @@ type LastReported = {
 export default function MapScreen() {
   const mapRef = useRef<MapView>(null);
   const didCenterOnUserRef = useRef(false);
+
   // Start with default region immediately (Santa Cruz, CA)
   const [region, setRegion] = useState<Region>({
     latitude: 36.9741,
@@ -82,16 +77,21 @@ export default function MapScreen() {
     latitudeDelta: 0.01,
     longitudeDelta: 0.01,
   });
+
   const [visibleRegion, setVisibleRegion] = useState<Region>({
     latitude: 36.9741,
     longitude: -122.0308,
     latitudeDelta: 0.01,
     longitudeDelta: 0.01,
   });
+
   const regionDebounceRef = useRef<NodeJS.Timeout | null>(null);
   const [spots, setSpots] = useState<ParkingSpot[]>([]);
   const [tick, setTick] = useState(0); // Updates every second
   const [cloudReports, setCloudReports] = useState<ParkingReport[]>([]);
+
+  // NEW: hide cloud markers immediately after deleting (prevents "comes back" bug)
+  const [hiddenCloudIds, setHiddenCloudIds] = useState<Set<string>>(new Set());
 
   // Track which IDs we have already alerted for so we don't spam
   const alertedIds = useRef<Set<string>>(new Set());
@@ -100,9 +100,14 @@ export default function MapScreen() {
     latitude: number;
     longitude: number;
   } | null>(null);
+
   const [spotType, setSpotType] = useState<"free" | "paid">("free");
   const [rate, setRate] = useState("");
   const [showModal, setShowModal] = useState(false);
+
+  // NEW: prevent double submission + show progress
+  const [isCreatingSpot, setIsCreatingSpot] = useState(false);
+  const [isAutoTaking, setIsAutoTaking] = useState(false);
 
   // Duration picker state
   const [hours, setHours] = useState(0);
@@ -124,6 +129,7 @@ export default function MapScreen() {
   const [historySort, setHistorySort] = useState<
     "newest" | "oldest" | "paidFirst" | "freeFirst"
   >("newest");
+
   const [uid, setUid] = useState<string | null>(
     FIREBASE_AUTH.currentUser?.uid ?? null,
   );
@@ -301,13 +307,13 @@ export default function MapScreen() {
 
   // Helper to format text like "1m 30s"
   const formatDuration = (totalSeconds: number) => {
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
+    const h = Math.floor(totalSeconds / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
+    const s = totalSeconds % 60;
 
-    if (hours > 0) return `${hours}h ${minutes}m`;
-    if (minutes > 0) return `${minutes}m ${seconds}s`;
-    return `${seconds}s`;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
   };
 
   // Request notification permissions
@@ -340,18 +346,15 @@ export default function MapScreen() {
 
     return { minLat, maxLat, minLng, maxLng };
   }
+
   // Schedule notification for a parking spot
   const scheduleSpotNotification = async (
     spotId: string,
     durationSeconds: number,
-    spotType: string,
+    spotType_: string,
   ) => {
-    // Only schedule actual push notifications on Android or in production builds
-    // For iOS in Expo Go, rely on in-app Alert dialogs
-    if (Platform.OS === "ios") {
-      //console.log('iOS: Using in-app alerts instead of notifications in Expo Go');
-      return null;
-    }
+    // For iOS in Expo Go, rely on in-app Alert dialogs (your current behavior)
+    if (Platform.OS === "ios") return null;
 
     const hasPermission = await requestNotificationPermissions();
     if (!hasPermission) return null;
@@ -364,9 +367,11 @@ export default function MapScreen() {
       const notificationId = await Notifications.scheduleNotificationAsync({
         content: {
           title: "⚠️ Parking Spot Expiring Soon",
-          body: `Your ${spotType === "free" ? "Free" : "Paid"} parking spot will expire in ${formatDuration(timeRemaining)}!`,
+          body: `Your ${
+            spotType_ === "free" ? "Free" : "Paid"
+          } parking spot will expire in ${formatDuration(timeRemaining)}!`,
           sound: true,
-          vibrate: [0, 250, 250, 250], // Vibrate pattern: wait 0ms, vibrate 250ms, wait 250ms, vibrate 250ms
+          vibrate: [0, 250, 250, 250],
           priority: Notifications.AndroidNotificationPriority.HIGH,
           ...(Platform.OS === "android" && { channelId: "parking-alerts" }),
         },
@@ -377,8 +382,7 @@ export default function MapScreen() {
         },
       });
       return notificationId;
-    } catch (error) {
-      //console.log('Failed to schedule notification:', error);
+    } catch {
       return null;
     }
   };
@@ -389,7 +393,7 @@ export default function MapScreen() {
     const warningThreshold = Math.floor(durationSeconds * 0.9);
 
     if (age >= durationSeconds) {
-      return { color: "#999999", expired: true, warning: false, age }; // color won't be used because expired => not rendered
+      return { color: "#999999", expired: true, warning: false, age };
     }
     if (age >= warningThreshold) {
       return { color: "#FF0000", expired: false, warning: true, age };
@@ -399,37 +403,27 @@ export default function MapScreen() {
 
   /* ---------- CHECK FOR WARNINGS & EXPIRATIONS ---------- */
   const checkAlertsAndExpiration = () => {
-    //console.log("Checking alerts... tick:", tick);
-    // Combine local spots and my cloud reports
     const allMySpots = [...spots, ...myReports];
-    //console.log("Total spots to check:", allMySpots.length);
 
     for (const spot of allMySpots) {
       const age = getAgeInSeconds(spot.createdAt);
-      const duration = spot.durationSeconds || 30; // Default to 30s if not set
-      const warningThreshold = Math.floor(duration * 0.9); // Warning at 90%
+      const duration = spot.durationSeconds || 30;
+      const warningThreshold = Math.floor(duration * 0.9);
 
-      //console.log(`Spot ${spot.id}: age=${age}s, duration=${duration}s, threshold=${warningThreshold}s`);
-
-      // If it's in the warning zone AND we haven't alerted yet
       if (age >= warningThreshold && age < duration) {
-        //console.log(`Spot ${spot.id} is in warning zone!`);
         if (!alertedIds.current.has(spot.id)) {
-          //console.log(`Showing alert for spot ${spot.id}`);
           const timeRemaining = duration - age;
           const spotLabel = spot.type === "free" ? "Free" : "Paid";
 
-          // Use Alert for compatibility with Expo Go
           Alert.alert(
             "⚠️ Parking Spot Expiring Soon",
-            `Your ${spotLabel} parking spot will expire in ${formatDuration(timeRemaining)}!`,
+            `Your ${spotLabel} parking spot will expire in ${formatDuration(
+              timeRemaining,
+            )}!`,
             [{ text: "OK" }],
           );
 
-          // Mark as alerted so we don't spam
           alertedIds.current.add(spot.id);
-        } else {
-          //console.log(`Already alerted for spot ${spot.id}`);
         }
       }
     }
@@ -444,7 +438,6 @@ export default function MapScreen() {
 
       const removedCount = prev.length - stillValid.length;
       if (removedCount > 0) {
-        // Show alert for expired spots
         Alert.alert(
           "Parking Spots Expired",
           `${removedCount} parking spot(s) have expired and been removed.`,
@@ -479,51 +472,43 @@ export default function MapScreen() {
 
   const autoMarkTaken = async (firestoreId: string) => {
     if (!uid) return;
+    if (isAutoTaking) return;
 
-    // prevent repeats
+    setIsAutoTaking(true);
     alreadyAutoTakenRef.current.add(firestoreId);
 
     try {
       await markReportTaken(firestoreId, uid);
-
       showUndoBanner(firestoreId);
-
       setAutoTakenBanner("Marked as TAKEN (you arrived and parked).");
-
-      // Optional: clear last reported so it won’t trigger again later
       setLastReported(null);
       await AsyncStorage.removeItem(LAST_REPORTED_KEY);
     } catch (e: any) {
-      console.log("markReportTaken failed:", e);
       Alert.alert("Auto-taken failed", e?.message ?? String(e));
       alreadyAutoTakenRef.current.delete(firestoreId);
+    } finally {
+      setIsAutoTaking(false);
     }
   };
 
   const onLocationUpdate = (lat: number, lon: number) => {
     if (!lastReported?.firestoreId) return;
-
-    // If we already auto-marked this report, do nothing
     if (alreadyAutoTakenRef.current.has(lastReported.firestoreId)) return;
 
     const now = Date.now();
 
-    // Rolling window of samples
     samplesRef.current = [...samplesRef.current, { lat, lon, t: now }].slice(
       -SAMPLE_WINDOW,
     );
 
-    // Distance to last reported spot
     const d = distanceMeters(
       lat,
       lon,
       lastReported.latitude,
       lastReported.longitude,
     );
-
     const inside = d <= ARRIVE_RADIUS_M;
 
-    // Movement variance in the sample window
     const base = samplesRef.current[0];
     const maxDev = base
       ? Math.max(
@@ -535,7 +520,6 @@ export default function MapScreen() {
 
     const lowMovement = maxDev <= MOVEMENT_VARIANCE_M;
 
-    // Dwell logic
     if (inside && lowMovement) {
       if (dwellStartRef.current === null) dwellStartRef.current = now;
 
@@ -544,19 +528,68 @@ export default function MapScreen() {
         autoMarkTaken(lastReported.firestoreId);
       }
     } else {
-      // reset if you walk away / move a lot
       dwellStartRef.current = null;
     }
   };
+
+  // ---------------- OSM / Overpass check ----------------
+  const overpassCacheRef = useRef<Map<string, { ok: boolean; t: number }>>(
+    new Map(),
+  );
+
+  const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
+  const OVERPASS_RADIUS_M = 25; // tweak: 20–50 is typical
+  const OVERPASS_CACHE_MS = 60_000;
+
+  const isNearRoadOrParkingOSM = async (
+    latitude: number,
+    longitude: number,
+  ) => {
+    const key = `${latitude.toFixed(5)},${longitude.toFixed(5)}`;
+    const cached = overpassCacheRef.current.get(key);
+    if (cached && Date.now() - cached.t < OVERPASS_CACHE_MS) return cached.ok;
+
+    const query = `
+[out:json][timeout:8];
+(
+  way(around:${OVERPASS_RADIUS_M},${latitude},${longitude})["highway"];
+  way(around:${OVERPASS_RADIUS_M},${latitude},${longitude})["amenity"="parking"];
+  way(around:${OVERPASS_RADIUS_M},${latitude},${longitude})["building"="parking"];
+  way(around:${OVERPASS_RADIUS_M},${latitude},${longitude})["parking"];
+  relation(around:${OVERPASS_RADIUS_M},${latitude},${longitude})["amenity"="parking"];
+  relation(around:${OVERPASS_RADIUS_M},${latitude},${longitude})["building"="parking"];
+);
+out body;
+`;
+
+    try {
+      const res = await fetch(OVERPASS_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: `data=${encodeURIComponent(query)}`,
+      });
+
+      if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
+
+      const json: any = await res.json();
+      const ok = Array.isArray(json?.elements) && json.elements.length > 0;
+
+      overpassCacheRef.current.set(key, { ok, t: Date.now() });
+      return ok;
+    } catch (e) {
+      // Don't block user if Overpass is flaky; allow but cache as ok=true for a minute
+      overpassCacheRef.current.set(key, { ok: true, t: Date.now() });
+      throw e;
+    }
+  };
+
   /* ---------- EFFECTS ---------- */
 
   // The "Game Loop" - Ticks every 1 second
   useEffect(() => {
-    const interval = setInterval(() => {
-      setTick((prev) => prev + 1);
-    }, 1000);
+    const interval = setInterval(() => setTick((prev) => prev + 1), 1000);
     return () => clearInterval(interval);
-  }, []); // Empty deps - never recreate
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -564,12 +597,11 @@ export default function MapScreen() {
     };
   }, []);
 
-  // Separate effect to check alerts/expiration
   useEffect(() => {
     checkAlertsAndExpiration();
-  }, [tick]); // Only run when tick changes
+  }, [tick]);
 
-  // US 3.4 ADD: auto-hide banner
+  // auto-hide banner
   useEffect(() => {
     if (!autoTakenBanner) return;
     const t = setTimeout(() => setAutoTakenBanner(null), 4000);
@@ -580,10 +612,8 @@ export default function MapScreen() {
   useEffect(() => {
     (async () => {
       try {
-        // Request notification permissions
         await requestNotificationPermissions();
 
-        // Set up Android notification channel
         if (Platform.OS === "android") {
           await Notifications.setNotificationChannelAsync("parking-alerts", {
             name: "Parking Alerts",
@@ -596,10 +626,8 @@ export default function MapScreen() {
           });
         }
 
-        // Request location permission
         const { status } = await Location.requestForegroundPermissionsAsync();
 
-        // Load saved spots from storage
         const savedSpots = await AsyncStorage.getItem(STORAGE_KEY);
         if (savedSpots) {
           const parsed = JSON.parse(savedSpots);
@@ -628,7 +656,6 @@ export default function MapScreen() {
           } catch {}
         }
 
-        // Try to get current location
         if (status === "granted") {
           try {
             const loc = await Location.getCurrentPositionAsync({
@@ -645,29 +672,21 @@ export default function MapScreen() {
             setRegion(userRegion);
             setVisibleRegion(userRegion);
 
-            // THIS actually moves the camera
             if (!didCenterOnUserRef.current) {
               didCenterOnUserRef.current = true;
-
-              // give MapView one render frame to exist
               setTimeout(() => {
                 mapRef.current?.animateToRegion(userRegion, 700);
               }, 80);
             }
-            ////console.log("Got location:", loc.coords.latitude, loc.coords.longitude);
-          } catch (locError) {
-            ////console.log("Failed to get current location, using default:", locError);
-            // Fallback to default location
+          } catch {
             setRegion({
-              latitude: 36.9741, // Santa Cruz, CA
+              latitude: 36.9741,
               longitude: -122.0308,
               latitudeDelta: 0.01,
               longitudeDelta: 0.01,
             });
           }
         } else {
-          ////console.log("Location permission not granted, using default location");
-          // Use default location if no permission
           setRegion({
             latitude: 36.9741,
             longitude: -122.0308,
@@ -675,11 +694,9 @@ export default function MapScreen() {
             longitudeDelta: 0.01,
           });
         }
-      } catch (err) {
-        //console.error("Initialization error:", err);
-        // Always set a default region so app works
+      } catch {
         setRegion({
-          latitude: 36.9741, // Santa Cruz, CA
+          latitude: 36.9741,
           longitude: -122.0308,
           latitudeDelta: 0.01,
           longitudeDelta: 0.01,
@@ -730,7 +747,6 @@ export default function MapScreen() {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== "granted") return;
 
-      // restart watcher whenever lastReported or uid changes
       locationSub.current?.remove();
       locationSub.current = null;
 
@@ -755,25 +771,46 @@ export default function MapScreen() {
   }, [lastReported, uid]);
 
   /* ---------- HANDLERS ---------- */
-  const handleMapLongPress = (event: any) => {
+  const handleMapLongPress = async (event: any) => {
+    // avoid starting new add while we are saving one
+    if (isCreatingSpot) return;
+
     const { latitude, longitude } = event.nativeEvent.coordinate;
+
+    // validate against OSM roads/parking (Overpass)
+    try {
+      const ok = await isNearRoadOrParkingOSM(latitude, longitude);
+      if (!ok) {
+        Alert.alert(
+          "Not on a road/parking area",
+          "Try placing the spot closer to a road or a parking lot/structure.",
+        );
+        return;
+      }
+    } catch {
+      // If Overpass fails, allow but warn (keeps app usable)
+      Alert.alert(
+        "Could not verify location",
+        "OSM check failed (network/rate-limit). Spot was allowed anyway.",
+      );
+    }
+
     setPendingCoord({ latitude, longitude });
     setSpotType("free");
     setRate("");
     setShowModal(true);
   };
+
   const handleRegionChangeComplete = (r: Region) => {
-    // Prevent spamming Firestore while the user is panning
-    if (regionDebounceRef.current) {
-      clearTimeout(regionDebounceRef.current);
-    }
-    regionDebounceRef.current = setTimeout(() => {
-      setVisibleRegion(r);
-    }, 400);
+    if (regionDebounceRef.current) clearTimeout(regionDebounceRef.current);
+    regionDebounceRef.current = setTimeout(() => setVisibleRegion(r), 400);
   };
 
   const saveSpot = async () => {
     if (!pendingCoord) return;
+
+    // prevent double tap
+    if (isCreatingSpot) return;
 
     const totalSeconds = hours * 3600 + minutes * 60 + seconds;
 
@@ -781,6 +818,8 @@ export default function MapScreen() {
       Alert.alert("Invalid Duration", "Please set a duration greater than 0");
       return;
     }
+
+    setIsCreatingSpot(true);
 
     const timestamp = Date.now();
     const id = `spot-${timestamp}-${Math.random()}`;
@@ -796,13 +835,12 @@ export default function MapScreen() {
       durationSeconds: totalSeconds,
     };
 
+    // Close modal immediately so UI feels responsive
     closeModal();
 
-    // Schedule notification for this spot
     await scheduleSpotNotification(id, totalSeconds, spotType);
 
     try {
-      // Save to Firestore and get the document ID
       const firestoreId = await createParkingReport({
         latitude: newSpot.latitude,
         longitude: newSpot.longitude,
@@ -811,15 +849,11 @@ export default function MapScreen() {
         durationSeconds: totalSeconds,
       });
 
-      console.log("CREATED FIRESTORE DOC:", firestoreId);
-
-      // Add the Firestore ID to the spot and save locally
       newSpot.firestoreId = firestoreId;
       setSpots((prev) => [...prev, newSpot]);
 
-      // US 3.4 ADD: store last reported spot for auto-taken detection
       const last: LastReported = {
-        firestoreId, // use the variable you just got from createParkingReport
+        firestoreId,
         latitude: newSpot.latitude,
         longitude: newSpot.longitude,
         createdAt: Date.now(),
@@ -827,13 +861,14 @@ export default function MapScreen() {
       setLastReported(last);
       await AsyncStorage.setItem(LAST_REPORTED_KEY, JSON.stringify(last));
     } catch (e: any) {
-      console.log("createParkingReport failed:", e);
       Alert.alert(
         "Firestore save failed",
         e?.message ? String(e.message) : JSON.stringify(e),
       );
-
+      // keep local spot even if cloud fails
       setSpots((prev) => [...prev, newSpot]);
+    } finally {
+      setIsCreatingSpot(false);
     }
   };
 
@@ -841,16 +876,12 @@ export default function MapScreen() {
     Keyboard.dismiss();
     setShowModal(false);
     setPendingCoord(null);
-    // Reset duration picker
     setHours(0);
     setMinutes(0);
     setSeconds(30);
   };
 
   const confirmRemoveSpot = (id: string) => {
-    ////console.log("confirmRemoveSpot called with id:", id);
-
-    // Find the spot to get its Firestore ID
     const spot = spots.find((s) => s.id === id);
 
     Alert.alert("Remove Spot?", "Permanently remove this marker?", [
@@ -859,25 +890,33 @@ export default function MapScreen() {
         text: "Remove",
         style: "destructive",
         onPress: async () => {
-          ////console.log("Removing spot from local array:", id);
-
           // Remove from local state immediately
-          setSpots((prev) => {
-            const newSpots = prev.filter((s) => s.id !== id);
-            ////console.log("Spots before:", prev.length, "after:", newSpots.length);
-            return newSpots;
-          });
+          setSpots((prev) => prev.filter((s) => s.id !== id));
 
-          // Delete from Firestore if we have the document ID
-          if (spot?.firestoreId) {
+          const cloudId = spot?.firestoreId;
+          if (cloudId) {
+            // Hide cloud marker immediately so it cannot "pop back in"
+            setHiddenCloudIds((prev) => {
+              const next = new Set(prev);
+              next.add(cloudId);
+              return next;
+            });
+
             try {
-              await deleteParkingReport(spot.firestoreId);
-              ////console.log("Deleted from Firestore:", spot.firestoreId);
-            } catch (e) {
-              ////console.log("Failed to delete from Firestore:", e);
+              await deleteParkingReport(cloudId);
+            } catch (e: any) {
+              // If delete fails, unhide and tell user
+              setHiddenCloudIds((prev) => {
+                const next = new Set(prev);
+                next.delete(cloudId);
+                return next;
+              });
+
+              Alert.alert(
+                "Delete failed",
+                e?.message ?? "Could not delete this spot from the cloud.",
+              );
             }
-          } else {
-            ////console.log("No Firestore ID found for spot:", id);
           }
         },
       },
@@ -900,20 +939,16 @@ export default function MapScreen() {
 
     if (isCloud && data.status === "resolved") return null;
 
-    const duration = data.durationSeconds || 30; // Default to 30s
-    const { color, expired, warning } = getPinStatus(data.createdAt, duration);
+    const duration = data.durationSeconds || 30;
+    const { color, expired } = getPinStatus(data.createdAt, duration);
 
-    // If expired, DO NOT RENDER on map
     if (expired) return null;
 
-    // Stable key - never changes unless marker is added/removed
     return (
       <Marker
         key={`${isCloud ? "cloud" : "local"}-${data.id}`}
         coordinate={coord}
-        onPress={() => {
-          setSelectedMarker({ data, isCloud });
-        }}
+        onPress={() => setSelectedMarker({ data, isCloud })}
       >
         <View style={[styles.customPin, { backgroundColor: color }]}>
           <Text style={styles.pinText}>{data.type === "free" ? "F" : "$"}</Text>
@@ -932,28 +967,26 @@ export default function MapScreen() {
         showsMyLocationButton={true}
         followsUserLocation={false}
         onLongPress={handleMapLongPress}
-        onRegionChangeComplete={(r) => setVisibleRegion(r)}
+        onRegionChangeComplete={handleRegionChangeComplete}
       >
-        {/* Render local spots (your spots that you control) */}
-        {spots.map((spot) => {
-          ////console.log("Rendering local spot:", spot.id);
-          return renderMarker(spot, false);
-        })}
+        {spots.map((spot) => renderMarker(spot, false))}
 
-        {/* Render cloud spots from ALL users (will sync deletions) */}
         {cloudReports
-          .filter((r) => {
-            // Filter out spots that match our local spots (avoid duplicates)
-            const isDuplicate = spots.some((s) => s.firestoreId === r.id);
-            if (isDuplicate) {
-              ////console.log("Skipping duplicate cloud spot:", r.id);
-            }
-            return !isDuplicate;
-          })
+          .filter((r) => !hiddenCloudIds.has(r.id))
+          .filter((r) => !spots.some((s) => s.firestoreId === r.id))
           .map((r) => renderMarker(r, true))}
       </MapView>
 
-      {/* Undo banner for auto-marked taken reports */}
+      {/* NEW: tiny loading pill */}
+      {(isCreatingSpot || isAutoTaking) && (
+        <View style={styles.busyPill}>
+          <ActivityIndicator size="small" color="#000" />
+          <Text style={styles.busyPillText}>
+            {isCreatingSpot ? "Saving spot..." : "Updating..."}
+          </Text>
+        </View>
+      )}
+
       {undoState && (
         <View style={styles.undoBanner}>
           <Text style={styles.undoText}>
@@ -1081,6 +1114,7 @@ export default function MapScreen() {
         <View style={styles.modalOverlay}>
           <View style={[styles.modal, { maxHeight: "80%" }]}>
             <Text style={styles.modalTitle}>My Report History</Text>
+
             <View style={styles.filterBlock}>
               <Text style={styles.filterLabel}>Type</Text>
               <View style={styles.pillRow}>
@@ -1224,6 +1258,7 @@ export default function MapScreen() {
                 </TouchableOpacity>
               </View>
             </View>
+
             <FlatList
               data={filteredMyReports}
               keyExtractor={(item) => item.id}
@@ -1231,12 +1266,10 @@ export default function MapScreen() {
                 <Text style={{ textAlign: "center" }}>No reports yet.</Text>
               }
               renderItem={({ item }) => {
-                // Check if it expired relative to NOW
                 const ageSeconds = getAgeInSeconds(item.createdAt);
                 const duration = item.durationSeconds || 30;
                 const isExpired = ageSeconds >= duration;
 
-                // If expired, cap the time at duration. If active, show real time.
                 const durationText = isExpired
                   ? formatDuration(duration)
                   : formatDuration(ageSeconds);
@@ -1318,6 +1351,7 @@ export default function MapScreen() {
                   spotType === "free" && styles.freeSelected,
                 ]}
                 onPress={() => setSpotType("free")}
+                disabled={isCreatingSpot}
               >
                 <Text>Free</Text>
               </TouchableOpacity>
@@ -1328,6 +1362,7 @@ export default function MapScreen() {
                   spotType === "paid" && styles.paidSelected,
                 ]}
                 onPress={() => setSpotType("paid")}
+                disabled={isCreatingSpot}
               >
                 <Text>Paid</Text>
               </TouchableOpacity>
@@ -1339,10 +1374,10 @@ export default function MapScreen() {
                 value={rate}
                 onChangeText={setRate}
                 style={styles.input}
+                editable={!isCreatingSpot}
               />
             )}
 
-            {/* Duration Picker */}
             <Text style={styles.durationLabel}>Duration:</Text>
             <View style={styles.pickerContainer}>
               <View style={styles.pickerColumn}>
@@ -1359,6 +1394,7 @@ export default function MapScreen() {
                         hours === h && styles.pickerItemSelected,
                       ]}
                       onPress={() => setHours(h)}
+                      disabled={isCreatingSpot}
                     >
                       <Text
                         style={[
@@ -1387,6 +1423,7 @@ export default function MapScreen() {
                         minutes === m && styles.pickerItemSelected,
                       ]}
                       onPress={() => setMinutes(m)}
+                      disabled={isCreatingSpot}
                     >
                       <Text
                         style={[
@@ -1415,6 +1452,7 @@ export default function MapScreen() {
                         seconds === s && styles.pickerItemSelected,
                       ]}
                       onPress={() => setSeconds(s)}
+                      disabled={isCreatingSpot}
                     >
                       <Text
                         style={[
@@ -1434,11 +1472,17 @@ export default function MapScreen() {
               Total: {formatDuration(hours * 3600 + minutes * 60 + seconds)}
             </Text>
 
-            <TouchableOpacity style={styles.saveButton} onPress={saveSpot}>
-              <Text style={styles.saveText}>Save</Text>
+            <TouchableOpacity
+              style={[styles.saveButton, isCreatingSpot && { opacity: 0.6 }]}
+              onPress={saveSpot}
+              disabled={isCreatingSpot}
+            >
+              <Text style={styles.saveText}>
+                {isCreatingSpot ? "Saving..." : "Save"}
+              </Text>
             </TouchableOpacity>
 
-            <TouchableOpacity onPress={closeModal}>
+            <TouchableOpacity onPress={closeModal} disabled={isCreatingSpot}>
               <Text style={styles.cancelText}>Cancel</Text>
             </TouchableOpacity>
           </View>
@@ -1468,52 +1512,25 @@ const styles = StyleSheet.create({
     shadowRadius: 3,
   },
   pinText: { color: "white", fontWeight: "bold" },
-  calloutContainer: {
-    backgroundColor: "white",
-    borderRadius: 8,
-    padding: 12,
-    width: 200,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 3.84,
-    elevation: 5,
+
+  // NEW: small busy pill
+  busyPill: {
+    position: "absolute",
+    top: 12,
+    left: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(255,255,255,0.95)",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    elevation: 6,
   },
-  callout: {
-    width: 200,
-  },
-  calloutTitle: {
-    fontWeight: "bold",
-    marginBottom: 5,
-    fontSize: 14,
-    color: "#000",
-  },
-  warningText: {
-    color: "red",
-  },
-  calloutAge: {
+  busyPillText: {
+    marginLeft: 8,
     fontWeight: "600",
-    color: "#333",
-    marginTop: 4,
   },
-  calloutTimeLeft: {
-    fontWeight: "600",
-    color: "#666",
-    fontSize: 12,
-    marginTop: 2,
-  },
-  removeHintContainer: {
-    marginTop: 10,
-    paddingTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: "#eee",
-  },
-  removeHint: {
-    color: "#FF3B30",
-    fontSize: 12,
-    fontWeight: "600",
-    textAlign: "center",
-  },
+
   colorGuide: {
     position: "absolute",
     bottom: 20,
