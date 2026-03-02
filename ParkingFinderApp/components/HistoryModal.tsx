@@ -1,366 +1,281 @@
-// modal that shows the user's report history, with filters and sorting options
-import React, { useState, useMemo } from "react";
-import {
-  Modal,
-  View,
-  Text,
-  TouchableOpacity,
-  FlatList,
-  StyleSheet,
-} from "react-native";
-import { ParkingReport } from "../parkingReports";
-import { getTimeInMillis, getAgeInSeconds, formatDuration } from "../utils/time";
+// HistoryModal.tsx
+// Modal that shows the signed-in user's report history with simple filters + sorting.
 
+import React, { useMemo, useState } from 'react';
+import { FlatList, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import type MapView from 'react-native-maps';
+import type { Region } from 'react-native-maps';
+
+import type { ParkingReport } from '../services/parkingReports';
+import { formatDuration, getAgeInSeconds, getTimeInMillis } from '../utils/time';
+
+const DEFAULT_FOCUS_REGION: Pick<Region, 'latitudeDelta' | 'longitudeDelta'> = {
+  latitudeDelta: 0.01,
+  longitudeDelta: 0.01,
+};
+
+const FOCUS_ANIMATION_MS = 350;
+
+type HistoryTypeFilter = 'all' | 'free' | 'paid';
+type HistoryStatusFilter = 'all' | 'open' | 'resolved';
+type HistoryRangeFilter = 'all' | '24h' | '7d' | '30d';
+type HistorySortOption = 'newest' | 'oldest' | 'paidFirst' | 'freeFirst';
 
 type Props = {
   showHistory: boolean;
   myReports: ParkingReport[];
-  mapRef: React.RefObject<any>;
+  mapRef: React.RefObject<MapView | null>;
   setShowHistory: (v: boolean) => void;
 };
 
-export const HistoryModal = ({
-  showHistory,
-  myReports,
-  mapRef,
-  setShowHistory,
-}: Props) => {
-  const [historyType, setHistoryType] = useState<"all" | "free" | "paid">(
-    "all",
-  );
-  // added status, range, and sort filters to the history modal
-  const [historyStatus, setHistoryStatus] = useState<
-    "all" | "open" | "resolved"
-  >("all");
-  const [historyRange, setHistoryRange] = useState<
-    "all" | "24h" | "7d" | "30d"
-  >("all");
-  const [historySort, setHistorySort] = useState<
-    "newest" | "oldest" | "paidFirst" | "freeFirst"
-  >("newest");
-    // useMemo to filter and sort the user's reports based on the selected filters and sorting options
+function getRangeMs(range: HistoryRangeFilter): number | null {
+  switch (range) {
+    case '24h':
+      return 24 * 60 * 60 * 1000;
+    case '7d':
+      return 7 * 24 * 60 * 60 * 1000;
+    case '30d':
+      return 30 * 24 * 60 * 60 * 1000;
+    case 'all':
+    default:
+      return null;
+  }
+}
+
+function compareByTypeThenTime(
+  a: ParkingReport,
+  b: ParkingReport,
+  typeFirst: 'paid' | 'free',
+): number {
+  const at = getTimeInMillis(a.createdAt);
+  const bt = getTimeInMillis(b.createdAt);
+
+  if (a.type !== b.type) {
+    return a.type === typeFirst ? -1 : 1;
+  }
+
+  // Within the same type, default to newest-first.
+  return bt - at;
+}
+
+export function HistoryModal({ showHistory, myReports, mapRef, setShowHistory }: Props) {
+  const [historyType, setHistoryType] = useState<HistoryTypeFilter>('all');
+
+  // Filters: status, range, and sort.
+  const [historyStatus, setHistoryStatus] = useState<HistoryStatusFilter>('all');
+  const [historyRange, setHistoryRange] = useState<HistoryRangeFilter>('all');
+  const [historySort, setHistorySort] = useState<HistorySortOption>('newest');
+
+  // Filter + sort are derived state.
   const filteredMyReports = useMemo(() => {
-    const now = Date.now();
+    const nowMs = Date.now();
+    const rangeMs = getRangeMs(historyRange);
 
-    const withinRange = (createdAt: any) => {
-      if (historyRange === "all") return true;
+    const matchesRange = (createdAt: unknown) => {
+      if (!rangeMs) return true;
+
       const t = getTimeInMillis(createdAt);
-      const ageMs = now - t;
+      const ageMs = nowMs - t;
 
-      if (historyRange === "24h") return ageMs <= 24 * 60 * 60 * 1000;
-      if (historyRange === "7d") return ageMs <= 7 * 24 * 60 * 60 * 1000;
-      if (historyRange === "30d") return ageMs <= 30 * 24 * 60 * 60 * 1000;
-      return true;
+      return ageMs <= rangeMs;
     };
 
-    // filter the user's reports based on the selected type, status, and range filters
-    let arr = myReports.filter((r) => {
-      if (historyType !== "all" && r.type !== historyType) return false;
-      if (historyStatus !== "all" && r.status !== historyStatus) return false;
-      if (!withinRange(r.createdAt)) return false;
+    const filtered = myReports.filter((r) => {
+      if (historyType !== 'all' && r.type !== historyType) return false;
+      if (historyStatus !== 'all' && r.status !== historyStatus) return false;
+      if (!matchesRange(r.createdAt)) return false;
       return true;
     });
 
-    // sort the filtered reports based on the selected sorting option
-    arr.sort((a, b) => {
+    filtered.sort((a, b) => {
       const at = getTimeInMillis(a.createdAt);
       const bt = getTimeInMillis(b.createdAt);
 
-      if (historySort === "newest") return bt - at;
-      if (historySort === "oldest") return at - bt;
-
-      // for paidFirst and freeFirst, sort by type first, then by createdAt
-      if (historySort === "paidFirst") {
-        if (a.type !== b.type) return a.type === "paid" ? -1 : 1;
-        return bt - at;
+      switch (historySort) {
+        case 'newest':
+          return bt - at;
+        case 'oldest':
+          return at - bt;
+        case 'paidFirst':
+          return compareByTypeThenTime(a, b, 'paid');
+        case 'freeFirst':
+          return compareByTypeThenTime(a, b, 'free');
+        default:
+          return bt - at;
       }
-
-      // for freeFirst, sort by type first, then by createdAt
-      if (historySort === "freeFirst") {
-        if (a.type !== b.type) return a.type === "free" ? -1 : 1;
-        return bt - at;
-      }
-
-      return bt - at;
     });
 
-    return arr;
+    return filtered;
   }, [myReports, historyType, historyStatus, historyRange, historySort]);
+
+  const close = () => setShowHistory(false);
+
+  const focusMarker = (report: ParkingReport) => {
+    mapRef.current?.animateToRegion(
+      {
+        latitude: report.latitude,
+        longitude: report.longitude,
+        ...DEFAULT_FOCUS_REGION,
+      },
+      FOCUS_ANIMATION_MS,
+    );
+
+    close();
+  };
+
+  const renderPill = (label: string, isActive: boolean, onPress: () => void) => {
+    return (
+      <TouchableOpacity style={[styles.pill, isActive && styles.pillActive]} onPress={onPress}>
+        <Text style={styles.pillText}>{label}</Text>
+      </TouchableOpacity>
+    );
+  };
+
+  const renderItem = ({ item }: { item: ParkingReport }) => {
+    const ageSeconds = getAgeInSeconds(item.createdAt);
+    const durationSeconds = item.durationSeconds ?? 30;
+
+    const isExpired = ageSeconds >= durationSeconds;
+
+    // Display how long it lasted if expired, otherwise show "alive so far".
+    const durationText = isExpired ? formatDuration(durationSeconds) : formatDuration(ageSeconds);
+
+    const statusLabel = isExpired ? 'Expired' : 'Active';
+    const statusColor = isExpired ? '#999' : 'green';
+
+    const label =
+      item.type === 'free' ? 'Free Spot' : `Paid Spot${item.rate ? `: ${item.rate}` : ''}`;
+
+    return (
+      // Each row shows type, status, and duration. Tapping focuses the map if not expired.
+      <TouchableOpacity
+        style={[styles.historyRow, isExpired && styles.historyRowExpired]}
+        disabled={isExpired}
+        onPress={() => focusMarker(item)}
+      >
+        <View style={styles.rowHeader}>
+          <Text style={[styles.historyTitle, isExpired && styles.textMuted]}>{label}</Text>
+          <Text style={[styles.statusText, { color: statusColor }]}>{statusLabel}</Text>
+        </View>
+
+        <Text style={styles.historySub}>Alive for: {durationText}</Text>
+      </TouchableOpacity>
+    );
+  };
 
   return (
     <Modal visible={showHistory} transparent animationType="slide">
       <View style={styles.modalOverlay}>
-        <View style={[styles.modal, { maxHeight: "80%" }]}>
+        <View style={styles.modal}>
           <Text style={styles.modalTitle}>My Report History</Text>
-            // filter options for the history modal, including type, status, range, and sort filters
+
+          {/* Filters: type, status, range, sort */}
           <View style={styles.filterBlock}>
             <Text style={styles.filterLabel}>Type</Text>
             <View style={styles.pillRow}>
-              <TouchableOpacity
-                style={[styles.pill, historyType === "all" && styles.pillActive]}
-                onPress={() => setHistoryType("all")}
-              >
-                <Text style={styles.pillText}>All</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.pill,
-                  historyType === "free" && styles.pillActive,
-                ]}
-                onPress={() => setHistoryType("free")}
-              >
-                <Text style={styles.pillText}>Free</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.pill,
-                  historyType === "paid" && styles.pillActive,
-                ]}
-                onPress={() => setHistoryType("paid")}
-              >
-                <Text style={styles.pillText}>Paid</Text>
-              </TouchableOpacity>
+              {renderPill('All', historyType === 'all', () => setHistoryType('all'))}
+              {renderPill('Free', historyType === 'free', () => setHistoryType('free'))}
+              {renderPill('Paid', historyType === 'paid', () => setHistoryType('paid'))}
             </View>
 
             <Text style={styles.filterLabel}>Status</Text>
             <View style={styles.pillRow}>
-              <TouchableOpacity
-                style={[
-                  styles.pill,
-                  historyStatus === "all" && styles.pillActive,
-                ]}
-                onPress={() => setHistoryStatus("all")}
-              >
-                <Text style={styles.pillText}>All</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.pill,
-                  historyStatus === "open" && styles.pillActive,
-                ]}
-                onPress={() => setHistoryStatus("open")}
-              >
-                <Text style={styles.pillText}>Open</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.pill,
-                  historyStatus === "resolved" && styles.pillActive,
-                ]}
-                onPress={() => setHistoryStatus("resolved")}
-              >
-                <Text style={styles.pillText}>Resolved</Text>
-              </TouchableOpacity>
+              {renderPill('All', historyStatus === 'all', () => setHistoryStatus('all'))}
+              {renderPill('Open', historyStatus === 'open', () => setHistoryStatus('open'))}
+              {renderPill('Resolved', historyStatus === 'resolved', () =>
+                setHistoryStatus('resolved'),
+              )}
             </View>
 
             <Text style={styles.filterLabel}>Range</Text>
             <View style={styles.pillRow}>
-              <TouchableOpacity
-                style={[
-                  styles.pill,
-                  historyRange === "all" && styles.pillActive,
-                ]}
-                onPress={() => setHistoryRange("all")}
-              >
-                <Text style={styles.pillText}>All</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.pill,
-                  historyRange === "24h" && styles.pillActive,
-                ]}
-                onPress={() => setHistoryRange("24h")}
-              >
-                <Text style={styles.pillText}>24h</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.pill,
-                  historyRange === "7d" && styles.pillActive,
-                ]}
-                onPress={() => setHistoryRange("7d")}
-              >
-                <Text style={styles.pillText}>7d</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.pill,
-                  historyRange === "30d" && styles.pillActive,
-                ]}
-                onPress={() => setHistoryRange("30d")}
-              >
-                <Text style={styles.pillText}>30d</Text>
-              </TouchableOpacity>
+              {renderPill('All', historyRange === 'all', () => setHistoryRange('all'))}
+              {renderPill('24h', historyRange === '24h', () => setHistoryRange('24h'))}
+              {renderPill('7d', historyRange === '7d', () => setHistoryRange('7d'))}
+              {renderPill('30d', historyRange === '30d', () => setHistoryRange('30d'))}
             </View>
 
             <Text style={styles.filterLabel}>Sort</Text>
             <View style={styles.pillRow}>
-              <TouchableOpacity
-                style={[
-                  styles.pill,
-                  historySort === "newest" && styles.pillActive,
-                ]}
-                onPress={() => setHistorySort("newest")}
-              >
-                <Text style={styles.pillText}>Newest</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.pill,
-                  historySort === "oldest" && styles.pillActive,
-                ]}
-                onPress={() => setHistorySort("oldest")}
-              >
-                <Text style={styles.pillText}>Oldest</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.pill,
-                  historySort === "paidFirst" && styles.pillActive,
-                ]}
-                onPress={() => setHistorySort("paidFirst")}
-              >
-                <Text style={styles.pillText}>Paid first</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.pill,
-                  historySort === "freeFirst" && styles.pillActive,
-                ]}
-                onPress={() => setHistorySort("freeFirst")}
-              >
-                <Text style={styles.pillText}>Free first</Text>
-              </TouchableOpacity>
+              {renderPill('Newest', historySort === 'newest', () => setHistorySort('newest'))}
+              {renderPill('Oldest', historySort === 'oldest', () => setHistorySort('oldest'))}
+              {renderPill('Paid first', historySort === 'paidFirst', () =>
+                setHistorySort('paidFirst'),
+              )}
+              {renderPill('Free first', historySort === 'freeFirst', () =>
+                setHistorySort('freeFirst'),
+              )}
             </View>
           </View>
 
           <FlatList
             data={filteredMyReports}
             keyExtractor={(item) => item.id}
-            ListEmptyComponent={
-              <Text style={{ textAlign: "center" }}>No reports yet.</Text>
-            }
-            renderItem={({ item }) => {
-              const ageSeconds = getAgeInSeconds(item.createdAt);
-              const duration = item.durationSeconds || 30;
-              const isExpired = ageSeconds >= duration;
-
-              // format the duration text to show how long the report was active for, or how long ago it expired
-              const durationText = isExpired
-                ? formatDuration(duration)
-                : formatDuration(ageSeconds);
-
-              const statusLabel = isExpired ? "Expired" : "Active";
-              const statusColor = isExpired ? "#999" : "green";
-
-              const label =
-                item.type === "free"
-                  ? "Free Spot"
-                  : `Paid Spot${item.rate ? `: ${item.rate}` : ""}`;
-
-              return (
-                // each report row in the history list, showing the type, status, and duration of the report, and allowing the user to tap on it to view it on the map (if it's not expired)
-                <TouchableOpacity
-                  style={[
-                    styles.historyRow,
-                    isExpired && styles.historyRowExpired,
-                  ]}
-                  disabled={isExpired}
-                  onPress={() => {
-                    if (!isExpired) {
-                      mapRef.current?.animateToRegion(
-                        {
-                          latitude: item.latitude,
-                          longitude: item.longitude,
-                          latitudeDelta: 0.01,
-                          longitudeDelta: 0.01,
-                        },
-                        350,
-                      );
-                      setShowHistory(false);
-                    }
-                  }}
-                >
-                  <View
-                    style={{
-                      flexDirection: "row",
-                      justifyContent: "space-between",
-                    }}
-                  >
-                    <Text
-                      style={[
-                        styles.historyTitle,
-                        isExpired && { color: "#666" },
-                      ]}
-                    >
-                      {label}
-                    </Text>
-                    <Text style={{ fontWeight: "bold", color: statusColor }}>
-                      {statusLabel}
-                    </Text>
-                  </View>
-
-                  <Text style={styles.historySub}>
-                    Alive for: {durationText}
-                  </Text>
-                </TouchableOpacity>
-              );
-            }}
+            renderItem={renderItem}
+            ListEmptyComponent={<Text style={styles.emptyText}>No reports yet.</Text>}
+            showsVerticalScrollIndicator={false}
           />
 
-          <TouchableOpacity onPress={() => setShowHistory(false)}>
+          <TouchableOpacity onPress={close}>
             <Text style={styles.cancelText}>Close</Text>
           </TouchableOpacity>
         </View>
       </View>
     </Modal>
   );
-};
+}
 
 const styles = StyleSheet.create({
   modalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.5)",
-    justifyContent: "center",
-    alignItems: "center",
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   modal: {
-    width: "85%",
-    maxHeight: "85%",
-    backgroundColor: "white",
+    width: '85%',
+    maxHeight: '80%',
+    backgroundColor: 'white',
     padding: 20,
     borderRadius: 15,
   },
   modalTitle: {
     fontSize: 18,
-    fontWeight: "bold",
-    textAlign: "center",
+    fontWeight: 'bold',
+    textAlign: 'center',
     marginBottom: 15,
   },
   filterBlock: { marginBottom: 12 },
-  filterLabel: { fontWeight: "bold", marginTop: 8, marginBottom: 6 },
-  pillRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  filterLabel: { fontWeight: 'bold', marginTop: 8, marginBottom: 6 },
+  pillRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   pill: {
     borderWidth: 1,
-    borderColor: "#ddd",
+    borderColor: '#ddd',
     paddingVertical: 6,
     paddingHorizontal: 10,
     borderRadius: 999,
   },
-  pillActive: { backgroundColor: "#e8f0ff", borderColor: "#9bbcff" },
+  pillActive: { backgroundColor: '#e8f0ff', borderColor: '#9bbcff' },
   pillText: { fontSize: 12 },
   historyRow: {
     borderWidth: 1,
-    borderColor: "#eee",
+    borderColor: '#eee',
     borderRadius: 10,
     padding: 12,
     marginBottom: 10,
   },
   historyRowExpired: {
-    backgroundColor: "#f5f5f5",
-    borderColor: "#ddd",
+    backgroundColor: '#f5f5f5',
+    borderColor: '#ddd',
   },
-  historyTitle: { fontWeight: "bold" },
-  historySub: { color: "#666", marginTop: 4, fontSize: 12 },
-  cancelText: { textAlign: "center", marginTop: 15, color: "#666" },
+  rowHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  historyTitle: { fontWeight: 'bold' },
+  statusText: { fontWeight: 'bold' },
+  historySub: { color: '#666', marginTop: 4, fontSize: 12 },
+  cancelText: { textAlign: 'center', marginTop: 15, color: '#666' },
+  emptyText: { textAlign: 'center' },
+  textMuted: { color: '#666' },
 });

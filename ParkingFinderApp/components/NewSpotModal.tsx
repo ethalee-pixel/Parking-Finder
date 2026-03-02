@@ -1,48 +1,72 @@
-// NewSpotModal - the modal form for creating a new parking spot.
-// Triggered by a long-press on the map. Lets the user pick free/paid,
-// set a rate (if paid), and choose a duration via hour/minute/second pickers.
-// On save, creates the report in Firestore and immediately marks it as taken by the creator.
+// NewSpotModal.tsx
+// Modal form for creating a new parking spot.
+// Triggered by long-press on the map. User selects free/paid, optional rate,
+// and a duration (hours/minutes/seconds). On save:
+// - schedules a local expiry warning notification
+// - attempts to create a Firestore report
+// - immediately marks the report as taken by the creator (red T)
+// If the cloud write fails, it falls back to saving locally.
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from 'react';
 import {
+  Alert,
+  Keyboard,
+  KeyboardAvoidingView,
   Modal,
-  View,
+  ScrollView,
+  StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  ScrollView,
-  KeyboardAvoidingView,
-  Keyboard,
-  Alert,
-  StyleSheet,
-} from "react-native";
-import { formatDuration } from "../utils/time";
-import { isNearRoadOrParkingOSM } from "../utils/geo";
-import { createParkingReport, markReportTaken } from "../parkingReports";
-import { scheduleSpotNotification } from "../utils/notifications";
-import { ParkingSpot } from "../types/parking";
+  View,
+} from 'react-native';
+
+import { createParkingReport, markReportTaken } from '../services/parkingReports';
+import { ParkingSpot } from '../types/parking';
+import { isNearRoadOrParkingOSM } from '../utils/geo';
+import { scheduleSpotNotification } from '../utils/notifications';
+import { formatDuration } from '../utils/time';
 
 type Props = {
   showModal: boolean;
-  // The coordinates from the long-press that triggered this modal
+
+  // Coordinates from the long-press that triggered this modal.
   pendingCoord: { latitude: number; longitude: number } | null;
+
+  // Current user's UID (null if not signed in).
   uid: string | null;
-  // True while the Firestore write is in flight (disables the save button)
+
+  // True while a Firestore write is in flight (disables actions).
   isCreatingSpot: boolean;
+
   setIsCreatingSpot: (v: boolean) => void;
   setShowModal: (v: boolean) => void;
   setPendingCoord: (v: { latitude: number; longitude: number } | null) => void;
+
+  // Local spot list update (used for fallback).
   setSpots: (fn: (prev: ParkingSpot[]) => ParkingSpot[]) => void;
+
+  // Taken/undo tracking state in Map.tsx.
   setMyTakenReportId: (id: string | null) => void;
   setTakenByMeIds: (fn: (prev: Set<string>) => Set<string>) => void;
   setHasManuallyTakenASpot: (v: boolean) => void;
   setManualTakenReportId: (id: string | null) => void;
+
+  // Auto-taken tracking + banner.
   setLastReported: (v: any) => void;
   setAutoTakenBanner: (v: string | null) => void;
+
+  // Shows the undo banner for a given report ID.
   showUndoBanner: (id: string) => void;
 };
 
-export const NewSpotModal = ({
+type SpotType = 'free' | 'paid';
+
+function clampInt(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, Math.floor(value)));
+}
+
+export function NewSpotModal({
   showModal,
   pendingCoord,
   uid,
@@ -58,17 +82,26 @@ export const NewSpotModal = ({
   setLastReported,
   setAutoTakenBanner,
   showUndoBanner,
-}: Props) => {
-  // Whether this is a free or paid spot
-  const [spotType, setSpotType] = useState<"free" | "paid">("free");
-  // The rate text shown for paid spots (e.g. "$2/hr")
-  const [rate, setRate] = useState("");
-  // Duration picker values
+}: Props) {
+  // Free vs paid selector.
+  const [spotType, setSpotType] = useState<SpotType>('free');
+
+  // Rate string for paid spots only (example: "$2/hr").
+  const [rate, setRate] = useState('');
+
+  // Duration picker values.
   const [hours, setHours] = useState(0);
   const [minutes, setMinutes] = useState(0);
-  const [seconds, setSeconds] = useState(30); // Default to 30 seconds
+  const [seconds, setSeconds] = useState(30);
 
-  // Resets all modal state and closes the modal
+  const totalSeconds = useMemo(() => {
+    const h = clampInt(hours, 0, 24);
+    const m = clampInt(minutes, 0, 59);
+    const s = clampInt(seconds, 0, 59);
+    return h * 3600 + m * 60 + s;
+  }, [hours, minutes, seconds]);
+
+  // Resets all state and closes the modal.
   const closeModal = () => {
     Keyboard.dismiss();
     setShowModal(false);
@@ -76,48 +109,71 @@ export const NewSpotModal = ({
     setHours(0);
     setMinutes(0);
     setSeconds(30);
+    setRate('');
+    setSpotType('free');
   };
 
-  // Creates the parking report in Firestore and immediately marks it as taken by the creator.
-  // Falls back to saving as a local spot if the Firestore write fails.
+  // Creates the report in Firestore and immediately marks it as taken by the creator.
+  // Falls back to saving locally if the cloud write fails.
   const saveSpot = async () => {
     if (!pendingCoord) return;
 
-    // Guard against double-tap
+    // Guard against double taps.
     if (isCreatingSpot) return;
 
-    const totalSeconds = hours * 3600 + minutes * 60 + seconds;
-
-    if (totalSeconds === 0) {
-      Alert.alert("Invalid Duration", "Please set a duration greater than 0");
+    if (!uid) {
+      Alert.alert('Not signed in', 'Please sign in to create a spot.');
       return;
     }
 
-    setIsCreatingSpot(true);
+    if (totalSeconds <= 0) {
+      Alert.alert('Invalid Duration', 'Please set a duration greater than 0.');
+      return;
+    }
 
+    // Generate a local ID up front (used for notification + fallback).
     const timestamp = Date.now();
-    const id = `spot-${timestamp}-${Math.random()}`;
+    const localId = `spot-${timestamp}-${Math.random()}`;
 
-    // Build the local spot object (used as fallback if Firestore fails)
+    // Build the local fallback spot object.
     const newSpot: ParkingSpot = {
-      id,
+      id: localId,
       latitude: pendingCoord.latitude,
       longitude: pendingCoord.longitude,
       type: spotType,
-      rate: spotType === "paid" ? rate.trim() : undefined,
+      rate: spotType === 'paid' ? rate.trim() : undefined,
       createdAt: timestamp,
       version: 0,
       durationSeconds: totalSeconds,
     };
 
-    // Close the modal immediately so the UI feels responsive
+    setIsCreatingSpot(true);
+
+    // Close the modal immediately for responsiveness.
     closeModal();
 
-    // Schedule a local notification warning before the spot expires
-    await scheduleSpotNotification(id, totalSeconds, spotType);
+    // Schedule an expiry warning notification.
+    await scheduleSpotNotification(localId, totalSeconds, spotType);
 
     try {
-      // Save the report to Firestore
+      // Optional safety check: verify near road/parking using OSM.
+      // If this fails due to network/rate-limit, we allow the spot and continue.
+      try {
+        const ok = await isNearRoadOrParkingOSM(newSpot.latitude, newSpot.longitude);
+        if (!ok) {
+          Alert.alert(
+            'Not on a road/parking area',
+            'Try placing the spot closer to a road or a parking lot/structure.',
+          );
+        }
+      } catch {
+        Alert.alert(
+          'Could not verify location',
+          'OSM check failed (network/rate-limit). Spot was allowed anyway.',
+        );
+      }
+
+      // Create a Firestore report.
       const firestoreId = await createParkingReport({
         latitude: newSpot.latitude,
         longitude: newSpot.longitude,
@@ -126,9 +182,10 @@ export const NewSpotModal = ({
         durationSeconds: totalSeconds,
       });
 
-      // Immediately mark the spot as taken by the creator so it shows as a red T
-      await markReportTaken(firestoreId, uid!);
+      // Mark it as taken immediately so it shows as a red T for the creator.
+      await markReportTaken(firestoreId, uid);
 
+      // Record taken state for rendering + undo logic.
       setMyTakenReportId(firestoreId);
       setTakenByMeIds((prev) => {
         const next = new Set(prev);
@@ -136,44 +193,24 @@ export const NewSpotModal = ({
         return next;
       });
 
-      // Lock the one-taken-spot limit since the creator is "taking" their own spot
+      // Creating a spot counts as your one manual-taken this session.
       setHasManuallyTakenASpot(true);
       setManualTakenReportId(firestoreId);
 
-      // Show undo banner so the creator can reverse if they made a mistake
+      // Show undo banner in case the user made a mistake.
       showUndoBanner(firestoreId);
 
-      // Attach the Firestore ID to the local spot object for deletion purposes
-      newSpot.firestoreId = firestoreId;
+      // Let the UI know what happened.
+      setAutoTakenBanner('Placed spot and marked as TAKEN.');
 
-      try {
-        // Second markReportTaken call ensures state is fully synced
-        await markReportTaken(firestoreId, uid!);
-
-        setTakenByMeIds((prev) => new Set(prev).add(firestoreId));
-        setMyTakenReportId(firestoreId);
-
-        setHasManuallyTakenASpot(true);
-        setManualTakenReportId(firestoreId);
-
-        showUndoBanner(firestoreId);
-
-        setAutoTakenBanner("Placed spot and marked as TAKEN.");
-      } catch (e: any) {
-        Alert.alert(
-          "Created, but could not mark taken",
-          e?.message ?? "The marker was created but could not be resolved.",
-        );
-      }
-
-      // Clear lastReported since we no longer need auto-taken tracking for this spot
+      // No need for auto-taken tracking when we immediately resolve it.
       setLastReported(null);
+
+      // Attach Firestore ID to local spot object (useful if you later store it locally).
+      newSpot.firestoreId = firestoreId;
     } catch (e: any) {
-      Alert.alert(
-        "Firestore save failed",
-        e?.message ? String(e.message) : JSON.stringify(e),
-      );
-      // Fall back to keeping the spot locally if the cloud save failed
+      // Cloud save failed, keep the spot locally so the user doesn't lose it.
+      Alert.alert('Firestore save failed', e?.message ?? 'Unknown error.');
       setSpots((prev) => [...prev, newSpot]);
     } finally {
       setIsCreatingSpot(false);
@@ -182,34 +219,34 @@ export const NewSpotModal = ({
 
   return (
     <Modal visible={showModal} transparent animationType="slide">
-      {/* Shift content up when keyboard appears */}
+      {/* Shifts content up when the keyboard appears. */}
       <KeyboardAvoidingView behavior="padding" style={styles.modalOverlay}>
         <View style={styles.modal}>
           <Text style={styles.modalTitle}>New Parking Spot</Text>
 
-          {/* Free / Paid type selector */}
+          {/* Free / Paid selector */}
           <View style={styles.typeRow}>
             <TouchableOpacity
-              style={[styles.typeButton, spotType === "free" && styles.freeSelected]}
-              onPress={() => setSpotType("free")}
+              style={[styles.typeButton, spotType === 'free' && styles.typeButtonSelectedFree]}
+              onPress={() => setSpotType('free')}
               disabled={isCreatingSpot}
             >
               <Text>Free</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={[styles.typeButton, spotType === "paid" && styles.paidSelected]}
-              onPress={() => setSpotType("paid")}
+              style={[styles.typeButton, spotType === 'paid' && styles.typeButtonSelectedPaid]}
+              onPress={() => setSpotType('paid')}
               disabled={isCreatingSpot}
             >
               <Text>Paid</Text>
             </TouchableOpacity>
           </View>
 
-          {/* Rate input only shown when "Paid" is selected */}
-          {spotType === "paid" && (
+          {/* Rate input only for paid spots */}
+          {spotType === 'paid' && (
             <TextInput
-              placeholder="Rate"
+              placeholder="Rate (e.g. $2/hr)"
               value={rate}
               onChangeText={setRate}
               style={styles.input}
@@ -217,82 +254,46 @@ export const NewSpotModal = ({
             />
           )}
 
-          <Text style={styles.durationLabel}>Duration:</Text>
+          <Text style={styles.durationLabel}>Duration</Text>
 
-          {/* Duration picker: three scrollable columns for hours, minutes, seconds */}
+          {/* Duration picker: hours/minutes/seconds */}
           <View style={styles.pickerContainer}>
-            {/* Hours column (0-24) */}
-            <View style={styles.pickerColumn}>
-              <Text style={styles.pickerColumnLabel}>Hours</Text>
-              <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
-                {Array.from({ length: 25 }, (_, i) => i).map((h) => (
-                  <TouchableOpacity
-                    key={`h-${h}`}
-                    style={[styles.pickerItem, hours === h && styles.pickerItemSelected]}
-                    onPress={() => setHours(h)}
-                    disabled={isCreatingSpot}
-                  >
-                    <Text style={[styles.pickerItemText, hours === h && styles.pickerItemTextSelected]}>
-                      {h}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-            </View>
-
-            {/* Minutes column (0-59) */}
-            <View style={styles.pickerColumn}>
-              <Text style={styles.pickerColumnLabel}>Minutes</Text>
-              <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
-                {Array.from({ length: 60 }, (_, i) => i).map((m) => (
-                  <TouchableOpacity
-                    key={`m-${m}`}
-                    style={[styles.pickerItem, minutes === m && styles.pickerItemSelected]}
-                    onPress={() => setMinutes(m)}
-                    disabled={isCreatingSpot}
-                  >
-                    <Text style={[styles.pickerItemText, minutes === m && styles.pickerItemTextSelected]}>
-                      {m}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-            </View>
-
-            {/* Seconds column (0-59) */}
-            <View style={styles.pickerColumn}>
-              <Text style={styles.pickerColumnLabel}>Seconds</Text>
-              <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
-                {Array.from({ length: 60 }, (_, i) => i).map((s) => (
-                  <TouchableOpacity
-                    key={`s-${s}`}
-                    style={[styles.pickerItem, seconds === s && styles.pickerItemSelected]}
-                    onPress={() => setSeconds(s)}
-                    disabled={isCreatingSpot}
-                  >
-                    <Text style={[styles.pickerItemText, seconds === s && styles.pickerItemTextSelected]}>
-                      {s}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-            </View>
+            <PickerColumn
+              label="Hours"
+              value={hours}
+              max={24}
+              disabled={isCreatingSpot}
+              onSelect={setHours}
+              keyPrefix="h"
+            />
+            <PickerColumn
+              label="Minutes"
+              value={minutes}
+              max={59}
+              disabled={isCreatingSpot}
+              onSelect={setMinutes}
+              keyPrefix="m"
+            />
+            <PickerColumn
+              label="Seconds"
+              value={seconds}
+              max={59}
+              disabled={isCreatingSpot}
+              onSelect={setSeconds}
+              keyPrefix="s"
+            />
           </View>
 
-          {/* Live preview of the total selected duration */}
-          <Text style={styles.durationPreview}>
-            Total: {formatDuration(hours * 3600 + minutes * 60 + seconds)}
-          </Text>
+          {/* Live preview of selected duration */}
+          <Text style={styles.durationPreview}>Total: {formatDuration(totalSeconds)}</Text>
 
-          {/* Save button - dims while saving */}
+          {/* Save button */}
           <TouchableOpacity
-            style={[styles.saveButton, isCreatingSpot && { opacity: 0.6 }]}
+            style={[styles.saveButton, isCreatingSpot && styles.saveButtonDisabled]}
             onPress={saveSpot}
             disabled={isCreatingSpot}
           >
-            <Text style={styles.saveText}>
-              {isCreatingSpot ? "Saving..." : "Save"}
-            </Text>
+            <Text style={styles.saveText}>{isCreatingSpot ? 'Saving…' : 'Save'}</Text>
           </TouchableOpacity>
 
           <TouchableOpacity onPress={closeModal} disabled={isCreatingSpot}>
@@ -302,59 +303,106 @@ export const NewSpotModal = ({
       </KeyboardAvoidingView>
     </Modal>
   );
+}
+
+type PickerColumnProps = {
+  label: string;
+  value: number;
+  max: number;
+  disabled: boolean;
+  onSelect: (v: number) => void;
+  keyPrefix: string;
 };
+
+// Small helper component: a scrollable number picker column.
+function PickerColumn({ label, value, max, disabled, onSelect, keyPrefix }: PickerColumnProps) {
+  const items = useMemo(() => Array.from({ length: max + 1 }, (_, i) => i), [max]);
+
+  return (
+    <View style={styles.pickerColumn}>
+      <Text style={styles.pickerColumnLabel}>{label}</Text>
+      <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
+        {items.map((n) => {
+          const selected = n === value;
+          return (
+            <TouchableOpacity
+              key={`${keyPrefix}-${n}`}
+              style={[styles.pickerItem, selected && styles.pickerItemSelected]}
+              onPress={() => onSelect(n)}
+              disabled={disabled}
+            >
+              <Text style={[styles.pickerItemText, selected && styles.pickerItemTextSelected]}>
+                {n}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
+}
 
 const styles = StyleSheet.create({
   modalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.5)",
-    justifyContent: "center",
-    alignItems: "center",
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   modal: {
-    width: "85%",
-    maxHeight: "85%",
-    backgroundColor: "white",
+    width: '85%',
+    maxHeight: '85%',
+    backgroundColor: 'white',
     padding: 20,
     borderRadius: 15,
   },
   modalTitle: {
     fontSize: 18,
-    fontWeight: "bold",
-    textAlign: "center",
+    fontWeight: 'bold',
+    textAlign: 'center',
     marginBottom: 15,
   },
+
   typeRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     marginBottom: 15,
   },
   typeButton: {
+    width: '45%',
+    alignItems: 'center',
     padding: 10,
     borderWidth: 1,
-    borderColor: "#ccc",
+    borderColor: '#ccc',
     borderRadius: 8,
-    width: "45%",
-    alignItems: "center",
   },
-  freeSelected: { backgroundColor: "#c8e6c9" },  // Green tint when free is selected
-  paidSelected: { backgroundColor: "#ffcdd2" },  // Red tint when paid is selected
+  // Green tint when free is selected.
+  typeButtonSelectedFree: {
+    backgroundColor: '#c8e6c9',
+  },
+  // Red tint when paid is selected.
+  typeButtonSelectedPaid: {
+    backgroundColor: '#ffcdd2',
+  },
+
   input: {
     borderWidth: 1,
-    borderColor: "#ccc",
+    borderColor: '#ccc',
     padding: 10,
     borderRadius: 8,
     marginBottom: 15,
   },
+
   durationLabel: {
     fontSize: 16,
-    fontWeight: "600",
+    fontWeight: '600',
     marginBottom: 10,
     marginTop: 5,
   },
+
   pickerContainer: {
-    flexDirection: "row",
-    justifyContent: "space-between",
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     marginBottom: 15,
     height: 150,
   },
@@ -364,44 +412,61 @@ const styles = StyleSheet.create({
   },
   pickerColumnLabel: {
     fontSize: 12,
-    fontWeight: "600",
-    textAlign: "center",
+    fontWeight: '600',
+    textAlign: 'center',
     marginBottom: 5,
-    color: "#666",
+    color: '#666',
   },
   picker: {
     maxHeight: 120,
     borderWidth: 1,
-    borderColor: "#ddd",
+    borderColor: '#ddd',
     borderRadius: 8,
-    backgroundColor: "#f9f9f9",
+    backgroundColor: '#f9f9f9',
   },
   pickerItem: {
     padding: 8,
-    alignItems: "center",
+    alignItems: 'center',
     borderBottomWidth: 1,
-    borderBottomColor: "#eee",
+    borderBottomColor: '#eee',
   },
-  // Highlighted blue background for the selected value
   pickerItemSelected: {
-    backgroundColor: "#007AFF",
+    backgroundColor: '#007AFF',
   },
   pickerItemText: {
     fontSize: 16,
-    color: "#333",
+    color: '#333',
   },
   pickerItemTextSelected: {
-    color: "white",
-    fontWeight: "bold",
+    color: 'white',
+    fontWeight: 'bold',
   },
+
   durationPreview: {
-    textAlign: "center",
+    textAlign: 'center',
     fontSize: 14,
-    fontWeight: "600",
-    color: "#007AFF",
+    fontWeight: '600',
+    color: '#007AFF',
     marginBottom: 15,
   },
-  saveButton: { backgroundColor: "#007AFF", padding: 12, borderRadius: 8 },
-  saveText: { color: "white", textAlign: "center", fontWeight: "bold" },
-  cancelText: { textAlign: "center", marginTop: 15, color: "#666" },
+
+  saveButton: {
+    backgroundColor: '#007AFF',
+    padding: 12,
+    borderRadius: 8,
+  },
+  saveButtonDisabled: {
+    opacity: 0.6,
+  },
+  saveText: {
+    color: 'white',
+    textAlign: 'center',
+    fontWeight: 'bold',
+  },
+
+  cancelText: {
+    textAlign: 'center',
+    marginTop: 15,
+    color: '#666',
+  },
 });

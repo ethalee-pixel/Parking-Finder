@@ -1,30 +1,31 @@
-// all ui elements that appear on top of the map, such as the busy indicator, undo banner, color guide, history button, and auto-taken banner
-import React from "react";
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  ActivityIndicator,
-  StyleSheet,
-} from "react-native";
+// MapOverlays.tsx
+// UI elements that appear on top of the map: busy indicator, undo banner,
+// status legend, history/sign-out buttons, recenter button, and the auto-taken banner.
+
+import React, { useMemo } from 'react';
+import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+
+type UndoState = {
+  reportId: string;
+  expiresAt: number;
+  isProcessing: boolean;
+};
 
 type Props = {
   isCreatingSpot: boolean;
   isAutoTaking: boolean;
-  undoState: {
-    reportId: string;
-    expiresAt: number;
-    isProcessing: boolean;
-  } | null;
+  undoState: UndoState | null;
 
-    // banner text to show after auto-taking a spot, e.g. "Marked as TAKEN (you arrived and parked)."
+  // Banner text shown after auto-taking, e.g. "Marked as TAKEN (you arrived and parked)."
   autoTakenBanner: string | null;
+
   onUndo: () => void;
   onShowHistory: () => void;
   onSignOut: () => void;
+  onRecenter: () => void;
 };
-// the MapOverlays component renders various UI elements that appear on top of the map, such as the busy indicator when creating a spot or auto-taking, the undo banner after auto-taking, the color guide for spot statuses, the history button, and the auto-taken banner
-export const MapOverlays = ({
+
+export function MapOverlays({
   isCreatingSpot,
   isAutoTaking,
   undoState,
@@ -32,61 +33,73 @@ export const MapOverlays = ({
   onUndo,
   onShowHistory,
   onSignOut,
-}: Props) => {
+  onRecenter,
+}: Props) {
+  // Remaining seconds for the undo banner countdown.
+  const undoSecondsLeft = useMemo(() => {
+    if (!undoState) return 0;
+    return Math.max(0, Math.ceil((undoState.expiresAt - Date.now()) / 1000));
+  }, [undoState]);
+
   return (
     <>
       {(isCreatingSpot || isAutoTaking) && (
         <View style={styles.busyPill}>
           <ActivityIndicator size="small" color="#000" />
           <Text style={styles.busyPillText}>
-            {isCreatingSpot ? "Saving spot..." : "Updating..."}
+            {isCreatingSpot ? 'Saving spot...' : 'Updating...'}
           </Text>
         </View>
       )}
 
       {undoState && (
         <View style={styles.undoBanner}>
-          <Text style={styles.undoText}>
-            Marked as taken. Undo? (
-            {Math.max(0, Math.ceil((undoState.expiresAt - Date.now()) / 1000))}
-            s)
-          </Text>
+          <Text style={styles.undoText}>Marked as taken. Undo? ({undoSecondsLeft}s)</Text>
 
           <TouchableOpacity
-            style={[styles.undoBtn, undoState.isProcessing && { opacity: 0.6 }]}
+            style={[styles.undoBtn, undoState.isProcessing && styles.disabled]}
             onPress={onUndo}
             disabled={undoState.isProcessing}
           >
-            <Text style={styles.undoBtnText}>
-              {undoState.isProcessing ? "Undoing..." : "UNDO"}
-            </Text>
+            <Text style={styles.undoBtnText}>{undoState.isProcessing ? 'Undoing...' : 'UNDO'}</Text>
           </TouchableOpacity>
         </View>
       )}
 
+      {/* Simple color legend for marker status */}
       <View style={styles.colorGuide}>
         <Text style={styles.guideTitle}>Status</Text>
+
         <View style={styles.colorRow}>
-          <View style={[styles.colorDot, { backgroundColor: "#00FF00" }]} />
+          <View style={[styles.colorDot, styles.dotActive]} />
           <Text style={styles.guideText}>Active</Text>
         </View>
+
         <View style={styles.colorRow}>
-          <View style={[styles.colorDot, { backgroundColor: "#FF0000" }]} />
+          <View style={[styles.colorDot, styles.dotExpiring]} />
           <Text style={styles.guideText}>Expiring Soon</Text>
         </View>
       </View>
 
-      <TouchableOpacity style={styles.historyBtn} onPress={onShowHistory}>
-        <Text style={styles.historyBtnText}>My History</Text>
+      {/* Primary actions on the map */}
+      <TouchableOpacity style={styles.actionBtn} onPress={onShowHistory}>
+        <Text style={styles.actionBtnText}>My History</Text>
       </TouchableOpacity>
 
+      <TouchableOpacity style={[styles.actionBtn, styles.signOutBtn]} onPress={onSignOut}>
+        <Text style={styles.actionBtnText}>Sign Out</Text>
+      </TouchableOpacity>
+
+      {/* Recenter button (bottom-right) */}
       <TouchableOpacity
-        style={[styles.historyBtn, { top: 100 }]}
-        onPress={onSignOut}
+        style={styles.recenterBtn}
+        onPress={onRecenter}
+        accessibilityLabel="Recenter map"
       >
-        <Text style={styles.historyBtnText}>Sign Out</Text>
+        <Text style={styles.recenterText}>◎</Text>
       </TouchableOpacity>
 
+      {/* Brief informational banner after auto-taking */}
       {autoTakenBanner && (
         <View style={styles.banner}>
           <Text style={styles.bannerText}>{autoTakenBanner}</Text>
@@ -94,16 +107,16 @@ export const MapOverlays = ({
       )}
     </>
   );
-};
-    // styles for the various UI elements in the MapOverlays component, such as the busy pill, undo banner, color guide, history button, and auto-taken banner
+}
+
 const styles = StyleSheet.create({
   busyPill: {
-    position: "absolute",
+    position: 'absolute',
     top: 12,
     left: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "rgba(255,255,255,0.95)",
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.95)',
     paddingVertical: 8,
     paddingHorizontal: 12,
     borderRadius: 999,
@@ -111,65 +124,123 @@ const styles = StyleSheet.create({
   },
   busyPillText: {
     marginLeft: 8,
-    fontWeight: "600",
+    fontWeight: '600',
   },
+
   colorGuide: {
-    position: "absolute",
+    position: 'absolute',
     bottom: 20,
     left: 20,
-    backgroundColor: "white",
+    backgroundColor: 'white',
     padding: 10,
     borderRadius: 20,
     elevation: 5,
   },
-  guideTitle: { fontSize: 10, fontWeight: "bold", marginBottom: 5 },
-  colorRow: { flexDirection: "row", alignItems: "center", marginBottom: 4 },
-  guideText: { fontSize: 10, marginLeft: 5 },
-  colorDot: { width: 12, height: 12, borderRadius: 6 },
-  historyBtn: {
-    position: "absolute",
+  guideTitle: {
+    fontSize: 10,
+    fontWeight: 'bold',
+    marginBottom: 5,
+  },
+  colorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  guideText: {
+    fontSize: 10,
+    marginLeft: 5,
+  },
+  colorDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+  },
+  dotActive: {
+    backgroundColor: '#00FF00',
+  },
+  dotExpiring: {
+    backgroundColor: '#FF0000',
+  },
+
+  actionBtn: {
+    position: 'absolute',
     top: 50,
     right: 20,
-    backgroundColor: "white",
+    backgroundColor: 'white',
     paddingVertical: 10,
     paddingHorizontal: 14,
     borderRadius: 20,
     elevation: 5,
   },
-  historyBtnText: { fontWeight: "bold" },
+  signOutBtn: {
+    top: 100,
+  },
+  actionBtnText: {
+    fontWeight: 'bold',
+  },
+
+  // Bottom-right recenter button (thumb-friendly)
+  recenterBtn: {
+    position: 'absolute',
+    right: 20,
+    bottom: 34,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: 'white',
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 6,
+  },
+  recenterText: {
+    fontSize: 22,
+    fontWeight: '800',
+  },
+
   banner: {
-    position: "absolute",
+    position: 'absolute',
     top: 140,
     left: 20,
     right: 20,
     padding: 12,
     borderRadius: 12,
-    backgroundColor: "white",
+    backgroundColor: 'white',
     elevation: 6,
   },
   bannerText: {
-    textAlign: "center",
-    fontWeight: "600",
+    textAlign: 'center',
+    fontWeight: '600',
   },
+
   undoBanner: {
-    position: "absolute",
+    position: 'absolute',
     left: 16,
     right: 16,
     bottom: 24,
-    backgroundColor: "rgba(0,0,0,0.85)",
+    backgroundColor: 'rgba(0,0,0,0.85)',
     borderRadius: 12,
     paddingVertical: 12,
     paddingHorizontal: 14,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
-  undoText: { color: "white", flex: 1, marginRight: 12 },
+  undoText: {
+    color: 'white',
+    flex: 1,
+    marginRight: 12,
+  },
   undoBtn: {
-    backgroundColor: "white",
+    backgroundColor: 'white',
     paddingVertical: 8,
     paddingHorizontal: 14,
     borderRadius: 10,
   },
-  undoBtnText: { fontWeight: "800" },
+  undoBtnText: {
+    fontWeight: '800',
+  },
+
+  disabled: {
+    opacity: 0.6,
+  },
 });

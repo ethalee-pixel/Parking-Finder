@@ -1,27 +1,41 @@
-import { useEffect, useState } from "react";
-import { NavigationContainer } from "@react-navigation/native";
-import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import { onAuthStateChanged, User } from "firebase/auth";
+// App.tsx
+// App entry point. Sets up navigation and routes users to Login or Map
+// based on Firebase Auth state.
 
-import Login from "./app/screens/Login";
-import MapScreen from "./app/screens/Map";
-import { FIREBASE_AUTH } from "./FirebaseConfig";
+import { useEffect, useState } from 'react';
+import { NavigationContainer } from '@react-navigation/native';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { onAuthStateChanged, type User } from 'firebase/auth';
 
-const Stack = createNativeStackNavigator();
+import { FIREBASE_AUTH } from './FirebaseConfig';
+import Login from './app/screens/Login';
+import MapScreen from './app/screens/Map';
+
+type RootStackParamList = {
+  Login: undefined;
+  Map: undefined;
+};
+
+const Stack = createNativeStackNavigator<RootStackParamList>();
 
 export default function App() {
+  // Current Firebase Auth user (null when signed out)
   const [user, setUser] = useState<User | null>(null);
+  // True while we are waiting for the initial auth state callback
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(FIREBASE_AUTH, (u) => {
+    const unsubscribe = onAuthStateChanged(FIREBASE_AUTH, (u) => {
       setUser(u);
       setLoading(false);
     });
-    return unsub;
+
+    return unsubscribe;
   }, []);
 
-  if (loading) return null; // or add a loading screen
+  // Avoid rendering screens until we know whether the user is signed in.
+  // Replace with a LoadingScreen later if you want.
+  if (loading) return null;
 
   return (
     <NavigationContainer>

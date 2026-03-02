@@ -1,8 +1,11 @@
-import { registerRootComponent } from 'expo';
+// index.ts
+// Expo entry point. Registers the root React component so the app can run
+// in Expo Go and native builds.
 
+import { registerRootComponent } from 'expo';
 import App from './App';
 
-// registerRootComponent calls AppRegistry.registerComponent('main', () => App);
-// It also ensures that whether you load the app in Expo Go or in a native build,
-// the environment is set up appropriately
+// Equivalent to:
+// AppRegistry.registerComponent("main", () => App);
+// Ensures the environment is correctly configured for Expo.
 registerRootComponent(App);
