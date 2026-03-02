@@ -80,6 +80,7 @@ export function subscribeToParkingReportsInBounds(
           docMap.set(d.id, {
             id: d.id,
             userId: data.userId,
+            createdBy: data.createdBy,
             latitude: lat,
             longitude: lng,
             type: data.type,
@@ -123,6 +124,7 @@ export type ParkingReportCreate = {
 export type ParkingReport = {
   id: string;
   userId: string;
+  createdBy?: string;   // ✅ ADD THIS
   latitude: number;
   longitude: number;
   geohash: string;
@@ -130,7 +132,7 @@ export type ParkingReport = {
   rate: string | null;
   status: "open" | "resolved";
   createdAt?: any;
-  durationSeconds?: number; // ADD: Custom duration for parking spot
+  durationSeconds?: number;
   resolvedAt?: any;
   resolvedBy?: string;
 };
@@ -146,17 +148,18 @@ export async function createParkingReport(data: ParkingReportCreate) {
     throw new Error(`Invalid coordinates: ${data.latitude}, ${data.longitude}`);
   }
   const geohash = geohashForLocation([coord.latitude, coord.longitude]);
-  const docRef = await addDoc(collection(FIRESTORE_DB, "parkingReports"), {
-    userId: user.uid,
-    latitude: coord.latitude,
-    longitude: coord.longitude,
-    geohash,
-    type: data.type,
-    rate: data.type === "paid" ? (data.rate ?? "") : null,
-    status: "open",
-    createdAt: serverTimestamp(),
-    durationSeconds: data.durationSeconds ?? 30, // ADD: Store duration (default 30s)
-  });
+const docRef = await addDoc(collection(FIRESTORE_DB, "parkingReports"), {
+  userId: user.uid,
+  createdBy: user.uid, // ✅ save who created it (same as userId)
+  latitude: coord.latitude,
+  longitude: coord.longitude,
+  geohash,
+  type: data.type,
+  rate: data.type === "paid" ? (data.rate ?? "") : null,
+  status: "open",
+  createdAt: serverTimestamp(),
+  durationSeconds: data.durationSeconds ?? 30,
+});
 
   return docRef.id;
 }
@@ -214,6 +217,7 @@ export function subscribeToParkingReports(
         reports.push({
           id: d.id,
           userId: data.userId,
+          createdBy: data.createdBy,
           latitude: coord.latitude,
           longitude: coord.longitude,
           geohash: data.geohash,
@@ -256,20 +260,21 @@ export function subscribeToMyParkingReports(
         const coord = sanitizeCoord(data.latitude, data.longitude);
         if (!coord) continue;
 
-        reports.push({
-          id: d.id,
-          userId: data.userId,
-          latitude: coord.latitude,
-          longitude: coord.longitude,
-          geohash: data.geohash,
-          type: data.type,
-          rate: data.rate ?? null,
-          status: data.status ?? "open",
-          createdAt: data.createdAt,
-          durationSeconds: data.durationSeconds ?? 30, // ADD: Include duration
-          resolvedAt: data.resolvedAt,
-          resolvedBy: data.resolvedBy,
-        });
+      reports.push({
+        id: d.id,
+        userId: data.userId,
+        createdBy: data.createdBy, // ✅ ADD THIS
+        latitude: coord.latitude,
+        longitude: coord.longitude,
+        geohash: data.geohash,
+        type: data.type,
+        rate: data.rate ?? null,
+        status: data.status ?? "open",
+        createdAt: data.createdAt,
+        durationSeconds: data.durationSeconds ?? 30,
+        resolvedAt: data.resolvedAt,
+        resolvedBy: data.resolvedBy,
+      });
       }
       onData(reports);
     },

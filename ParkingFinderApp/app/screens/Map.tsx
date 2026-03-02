@@ -58,6 +58,7 @@ type ParkingSpot = {
 
 const STORAGE_KEY = "@parking_spots";
 const LAST_REPORTED_KEY = "@last_reported_spot";
+const MY_TAKEN_KEY = "@my_taken_report_id";
 
 type LastReported = {
   firestoreId: string;
@@ -69,7 +70,35 @@ type LastReported = {
 export default function MapScreen() {
   const mapRef = useRef<MapView>(null);
   const didCenterOnUserRef = useRef(false);
+  // NEW: briefly show a big red "T" after a spot is marked taken (local feedback)
+const [recentlyTakenIds, setRecentlyTakenIds] = useState<Set<string>>(new Set());
 
+const flashTakenT = (firestoreDocId: string) => {
+  setRecentlyTakenIds((prev) => {
+    const next = new Set(prev);
+    next.add(firestoreDocId);
+    return next;
+  });
+
+  setTimeout(() => {
+    setRecentlyTakenIds((prev) => {
+      const next = new Set(prev);
+      next.delete(firestoreDocId);
+      return next;
+    });
+  }, 1500);
+};
+// ---- Manual mark-taken restrictions ----
+const userPosRef = useRef<{ lat: number; lon: number } | null>(null);
+
+// how close you must be to manually mark taken
+const NEARBY_TAKEN_RADIUS_M = 75;
+
+// only allow marking ONE spot as taken (manual) per app session
+const [hasManuallyTakenASpot, setHasManuallyTakenASpot] = useState(false);
+const [takenByMeIds, setTakenByMeIds] = useState<Set<string>>(new Set());
+// NEW: remember which report was manually taken, so UNDO can unlock it
+const [manualTakenReportId, setManualTakenReportId] = useState<string | null>(null);
   // Start with default region immediately (Santa Cruz, CA)
   const [region, setRegion] = useState<Region>({
     latitude: 36.9741,
@@ -133,7 +162,7 @@ export default function MapScreen() {
   const [uid, setUid] = useState<string | null>(
     FIREBASE_AUTH.currentUser?.uid ?? null,
   );
-
+const [myTakenReportId, setMyTakenReportId] = useState<string | null>(null);
   // Filtered history based on user selections
   const filteredMyReports = useMemo(() => {
     const now = Date.now();
@@ -227,44 +256,83 @@ export default function MapScreen() {
     }, UNDO_WINDOW_MS);
   };
 
-  const undoAutoTaken = async () => {
-    if (!undoState) return;
+const undoAutoTaken = async () => {
+  if (!undoState) return;
 
-    // Prevent undo after time window expires
-    if (Date.now() > undoState.expiresAt) {
-      setUndoState(null);
-      return;
+  // Prevent undo after time window expires
+  if (Date.now() > undoState.expiresAt) {
+    setUndoState(null);
+    return;
+  }
+
+  // Prevent double taps
+  if (undoState.isProcessing) return;
+
+  setUndoState({ ...undoState, isProcessing: true });
+
+  try {
+    await updateDoc(doc(FIRESTORE_DB, "parkingReports", undoState.reportId), {
+      status: "open",
+      resolvedAt: null,
+      resolvedBy: null,
+    });
+if (myTakenReportId === undoState.reportId) setMyTakenReportId(null);
+    // Allow auto-taken to happen again later if needed
+    alreadyAutoTakenRef.current.delete(undoState.reportId);
+
+    // If this undo was for the manually-taken report, unlock the one-take limit
+    if (manualTakenReportId === undoState.reportId) {
+      setHasManuallyTakenASpot(false);
+      setManualTakenReportId(null);
     }
 
-    // Prevent double taps
-    if (undoState.isProcessing) return;
-
-    setUndoState({ ...undoState, isProcessing: true });
-
-    try {
-      await updateDoc(doc(FIRESTORE_DB, "parkingReports", undoState.reportId), {
-        status: "open",
-        resolvedAt: null,
-        resolvedBy: null,
-      });
-
-      // Allow auto-taken to happen again later if needed
-      alreadyAutoTakenRef.current.delete(undoState.reportId);
-
-      // Remove banner
-      setUndoState(null);
-      if (undoTimerRef.current) {
-        clearTimeout(undoTimerRef.current);
-        undoTimerRef.current = null;
-      }
-    } catch (e: any) {
-      setUndoState({ ...undoState, isProcessing: false });
-      Alert.alert(
-        "Undo failed",
-        e?.message ?? "Could not undo the auto-taken update.",
-      );
+    // Remove banner
+    setUndoState(null);
+    if (undoTimerRef.current) {
+      clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = null;
     }
-  };
+  } catch (e: any) {
+    setUndoState({ ...undoState, isProcessing: false });
+    Alert.alert(
+      "Undo failed",
+      e?.message ?? "Could not undo the auto-taken update.",
+    );
+  }
+};
+
+const reopenReport = async (reportId: string) => {
+  if (!uid) {
+    Alert.alert("Not signed in", "Please sign in to reopen a spot.");
+    return;
+  }
+
+  try {
+    await updateDoc(doc(FIRESTORE_DB, "parkingReports", reportId), {
+      status: "open",
+      resolvedAt: null,
+      resolvedBy: null,
+    });
+    if (myTakenReportId === reportId) setMyTakenReportId(null);
+    setTakenByMeIds((prev) => {
+  const next = new Set(prev);
+  next.delete(reportId);
+  return next;
+});
+
+    // Also unlock the “one manual taken” limit if this was the one you took
+    if (manualTakenReportId === reportId) {
+      setHasManuallyTakenASpot(false);
+      setManualTakenReportId(null);
+    }
+
+    Alert.alert("Reopened", "This spot is open again.");
+  } catch (e: any) {
+    Alert.alert("Failed", e?.message ?? "Could not reopen this report.");
+  }
+};
+
+
 
   // Cleanup: undo timer (prevents setState after unmount)
   useEffect(() => {
@@ -469,7 +537,13 @@ export default function MapScreen() {
 
     return 2 * R * Math.asin(Math.sqrt(s));
   };
+const isNearMe = (lat: number, lon: number) => {
+  const me = userPosRef.current;
+  if (!me) return { ok: false, dist: Infinity };
 
+  const dist = distanceMeters(me.lat, me.lon, lat, lon);
+  return { ok: dist <= NEARBY_TAKEN_RADIUS_M, dist };
+};
   const autoMarkTaken = async (firestoreId: string) => {
     if (!uid) return;
     if (isAutoTaking) return;
@@ -479,9 +553,11 @@ export default function MapScreen() {
 
     try {
       await markReportTaken(firestoreId, uid);
+      setMyTakenReportId(firestoreId);
       showUndoBanner(firestoreId);
       setAutoTakenBanner("Marked as TAKEN (you arrived and parked).");
       setLastReported(null);
+      setTakenByMeIds((prev) => new Set(prev).add(firestoreId));
       await AsyncStorage.removeItem(LAST_REPORTED_KEY);
     } catch (e: any) {
       Alert.alert("Auto-taken failed", e?.message ?? String(e));
@@ -625,6 +701,12 @@ out body;
             lightColor: "#FF0000",
           });
         }
+  useEffect(() => {
+  (async () => {
+    const saved = await AsyncStorage.getItem(MY_TAKEN_KEY);
+    if (saved) setMyTakenReportId(saved);
+  })();
+}, []);
 
         const { status } = await Location.requestForegroundPermissionsAsync();
 
@@ -717,6 +799,18 @@ out body;
     return unsub;
   }, [visibleRegion]);
 
+useEffect(() => {
+  if (!uid || !myTakenReportId) return;
+
+  const r = cloudReports.find((x) => x.id === myTakenReportId);
+  if (!r) return;
+
+  const stillMine =
+    r.status === "resolved" && (r as any).resolvedBy === uid; // use r.resolvedBy if your type has it
+
+  if (!stillMine) setMyTakenReportId(null);
+}, [cloudReports, uid, myTakenReportId]);
+
   useEffect(() => {
     if (!uid) {
       setMyReports([]);
@@ -732,6 +826,12 @@ out body;
   useEffect(() => {
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(spots));
   }, [spots]);
+
+useEffect(() => {
+  if (myTakenReportId) AsyncStorage.setItem(MY_TAKEN_KEY, myTakenReportId);
+  else AsyncStorage.removeItem(MY_TAKEN_KEY);
+}, [myTakenReportId]);
+
 
   useEffect(() => {
     const unsub = onAuthStateChanged(FIREBASE_AUTH, (user) => {
@@ -756,10 +856,14 @@ out body;
           timeInterval: 3000,
           distanceInterval: 3,
         },
-        (loc) => {
-          if (!mounted) return;
-          onLocationUpdate(loc.coords.latitude, loc.coords.longitude);
-        },
+(loc) => {
+  if (!mounted) return;
+
+  // store latest user position for "near me" checks
+  userPosRef.current = { lat: loc.coords.latitude, lon: loc.coords.longitude };
+
+  onLocationUpdate(loc.coords.latitude, loc.coords.longitude);
+},
       );
     })();
 
@@ -842,24 +946,70 @@ out body;
 
     try {
       const firestoreId = await createParkingReport({
-        latitude: newSpot.latitude,
-        longitude: newSpot.longitude,
-        type: newSpot.type,
-        rate: newSpot.rate,
-        durationSeconds: totalSeconds,
-      });
+  latitude: newSpot.latitude,
+  longitude: newSpot.longitude,
+  type: newSpot.type,
+  rate: newSpot.rate,
+  durationSeconds: totalSeconds,
+  createdBy: uid,
+});
 
-      newSpot.firestoreId = firestoreId;
-      setSpots((prev) => [...prev, newSpot]);
+// ✅ Immediately mark taken so it becomes a red T right away
+await markReportTaken(firestoreId, uid);
 
-      const last: LastReported = {
-        firestoreId,
-        latitude: newSpot.latitude,
-        longitude: newSpot.longitude,
-        createdAt: Date.now(),
-      };
-      setLastReported(last);
-      await AsyncStorage.setItem(LAST_REPORTED_KEY, JSON.stringify(last));
+// ✅ Update state so your UI knows “I took this”
+setMyTakenReportId(firestoreId);
+setTakenByMeIds((prev) => {
+  const next = new Set(prev);
+  next.add(firestoreId);
+  return next;
+});
+
+// ✅ Lock “only one taken” and allow reopen to unlock later
+setHasManuallyTakenASpot(true);
+setManualTakenReportId(firestoreId);
+
+// ✅ Show undo/reopen behavior like the others
+showUndoBanner(firestoreId);
+
+// ✅ If you still keep local pins, store firestoreId; BUT (recommended) don’t add to local spots at all
+newSpot.firestoreId = firestoreId;
+// setSpots((prev) => [...prev, newSpot]);  // <-- comment OUT this line if you want only cloud pins
+
+/**
+ * ✅ NEW: immediately mark it as taken (resolved) by YOU
+ * and lock the "one taken spot" rule.
+ */
+try {
+  // this updates Firestore: status -> resolved, resolvedBy -> uid, resolvedAt -> timestamp
+  await markReportTaken(firestoreId, uid!);
+
+  // show the big red T (your renderMarker already does this when resolvedBy == uid)
+  setTakenByMeIds((prev) => new Set(prev).add(firestoreId));
+  setMyTakenReportId(firestoreId);
+
+  // lock taking another spot until reopen
+  setHasManuallyTakenASpot(true);
+  setManualTakenReportId(firestoreId);
+
+  // optional: show undo banner if you want
+  showUndoBanner(firestoreId);
+
+  setAutoTakenBanner("Placed spot and marked as TAKEN.");
+} catch (e: any) {
+  Alert.alert(
+    "Created, but could not mark taken",
+    e?.message ?? "The marker was created but could not be resolved.",
+  );
+}
+
+// you do NOT need lastReported auto-take tracking anymore for this created spot
+setLastReported(null);
+await AsyncStorage.removeItem(LAST_REPORTED_KEY);
+
+
+
+
     } catch (e: any) {
       Alert.alert(
         "Firestore save failed",
@@ -923,6 +1073,50 @@ out body;
     ]);
   };
 
+const manualMarkTaken = async (reportId: string, reportLat: number, reportLon: number) => {
+  if (!uid) {
+    Alert.alert("Not signed in", "Please sign in to mark a spot as taken.");
+    return;
+  }
+
+  // only allow one manual mark-taken total
+  if (hasManuallyTakenASpot) {
+    Alert.alert("Limit reached", "You already marked one spot as taken.");
+    return;
+  }
+
+  const { ok, dist } = isNearMe(reportLat, reportLon);
+  if (!ok) {
+    Alert.alert(
+      "Too far away",
+      `You must be within ${NEARBY_TAKEN_RADIUS_M}m to mark this taken.\n\nDistance: ${Math.round(dist)}m`,
+    );
+    return;
+  }
+
+  if (isAutoTaking) return;
+
+  setIsAutoTaking(true);
+  try {
+    await markReportTaken(reportId, uid);
+    setMyTakenReportId(reportId);
+    setTakenByMeIds((prev) => new Set(prev).add(reportId));
+
+    // lock manual marking after success
+    setHasManuallyTakenASpot(true);
+    setManualTakenReportId(reportId);
+    
+    // optional undo like your auto-taken
+    showUndoBanner(reportId);
+
+    Alert.alert("Marked taken", "This spot was marked as taken.");
+  } catch (e: any) {
+    Alert.alert("Failed", e?.message ?? "Could not mark as taken.");
+  } finally {
+    setIsAutoTaking(false);
+  }
+};
+  
   const handleSignOut = async () => {
     try {
       await signOut(FIREBASE_AUTH);
@@ -933,29 +1127,87 @@ out body;
   };
 
   /* ---------- RENDER HELPERS ---------- */
-  const renderMarker = (data: any, isCloud: boolean) => {
-    const coord = safeCoord(data.latitude, data.longitude);
-    if (!coord) return null;
 
-    if (isCloud && data.status === "resolved") return null;
+const renderTakenTMarker = (
+  keyId: string,
+  latitude: any,
+  longitude: any,
+  onPress?: () => void,
+) => {
+  const coord = safeCoord(latitude, longitude);
+  if (!coord) return null;
 
-    const duration = data.durationSeconds || 30;
-    const { color, expired } = getPinStatus(data.createdAt, duration);
-
-    if (expired) return null;
-
-    return (
-      <Marker
-        key={`${isCloud ? "cloud" : "local"}-${data.id}`}
-        coordinate={coord}
-        onPress={() => setSelectedMarker({ data, isCloud })}
+  return (
+    <Marker
+      key={`taken-${keyId}`}
+      coordinate={coord}
+      onPress={onPress}
+    >
+      <View
+        style={{
+          width: 56,
+          height: 56,
+          borderRadius: 28,
+          backgroundColor: "red",
+          borderWidth: 3,
+          borderColor: "white",
+          justifyContent: "center",
+          alignItems: "center",
+          elevation: 8,
+          shadowColor: "#000",
+          shadowOffset: { width: 0, height: 3 },
+          shadowOpacity: 0.3,
+          shadowRadius: 4,
+        }}
       >
-        <View style={[styles.customPin, { backgroundColor: color }]}>
-          <Text style={styles.pinText}>{data.type === "free" ? "F" : "$"}</Text>
-        </View>
-      </Marker>
-    );
-  };
+        <Text style={{ color: "white", fontWeight: "900", fontSize: 30 }}>
+          T
+        </Text>
+      </View>
+    </Marker>
+  );
+};
+
+const renderMarker = (data: any, isCloud: boolean) => {
+  const coord = safeCoord(data.latitude, data.longitude);
+  if (!coord) return null;
+
+// If cloud report is resolved, show a BIG RED T permanently (and clickable)
+// Only show BIG RED T if *I* was the one who marked it taken
+if (isCloud && data.status === "resolved") {
+  const takenByMe = data.resolvedBy === uid || takenByMeIds.has(data.id);
+
+  if (!takenByMe) return null;
+
+  return renderTakenTMarker(
+    data.id,
+    coord.latitude,
+    coord.longitude,
+    () => setSelectedMarker({ data, isCloud: true }),
+  );
+}
+
+  const duration = data.durationSeconds || 30;
+  const { color, expired } = getPinStatus(data.createdAt, duration);
+
+  // For local spots, still hide if expired
+  if (!isCloud && expired) return null;
+
+  // For cloud OPEN spots, also hide if expired (optional, keep if you want)
+  if (isCloud && expired) return null;
+
+  return (
+    <Marker
+      key={`${isCloud ? "cloud" : "local"}-${data.id}`}
+      coordinate={coord}
+      onPress={() => setSelectedMarker({ data, isCloud })}
+    >
+      <View style={[styles.customPin, { backgroundColor: color }]}>
+        <Text style={styles.pinText}>{data.type === "free" ? "F" : "$"}</Text>
+      </View>
+    </Marker>
+  );
+};
 
   return (
     <View style={styles.container}>
@@ -975,6 +1227,7 @@ out body;
           .filter((r) => !hiddenCloudIds.has(r.id))
           .filter((r) => !spots.some((s) => s.firestoreId === r.id))
           .map((r) => renderMarker(r, true))}
+          {/* NEW: show big red T briefly after marking taken */}
       </MapView>
 
       {/* NEW: tiny loading pill */}
@@ -1056,6 +1309,7 @@ out body;
               (() => {
                 const data = selectedMarker.data;
                 const isCloud = selectedMarker.isCloud;
+                const isResolved = isCloud && data.status === "resolved";
                 const duration = data.durationSeconds || 30;
                 const age = getAgeInSeconds(data.createdAt);
                 const formattedTime = formatDuration(age);
@@ -1084,17 +1338,157 @@ out body;
                       Time Left: {timeRemaining}
                     </Text>
 
-                    {!isCloud && (
-                      <TouchableOpacity
-                        style={styles.removeButton}
-                        onPress={() => {
-                          setSelectedMarker(null);
-                          confirmRemoveSpot(data.id);
-                        }}
-                      >
-                        <Text style={styles.removeButtonText}>Remove Spot</Text>
-                      </TouchableOpacity>
-                    )}
+{(() => {
+  const canDeleteLocal = !isCloud;
+  const canDeleteCloud = isCloud && !!uid && data.createdBy === uid;
+
+  if (!canDeleteLocal && !canDeleteCloud) return null;
+
+  return (
+    <TouchableOpacity
+      style={styles.removeButton}
+      onPress={() => {
+        setSelectedMarker(null);
+
+        if (!isCloud) {
+          confirmRemoveSpot(data.id);
+          return;
+        }
+
+        // cloud delete
+        const cloudId = data.id;
+        setHiddenCloudIds((prev) => new Set(prev).add(cloudId));
+
+        deleteParkingReport(cloudId).catch((e: any) => {
+          setHiddenCloudIds((prev) => {
+            const next = new Set(prev);
+            next.delete(cloudId);
+            return next;
+          });
+          Alert.alert("Delete failed", e?.message ?? "Could not delete.");
+        });
+      }}
+    >
+      <Text style={styles.removeButtonText}>Remove Pin</Text>
+    </TouchableOpacity>
+  );
+})()}
+{/* Manual Mark Taken button (cloud only) */}
+
+
+{selectedMarker?.isCloud && isResolved && (
+  <TouchableOpacity
+    style={[styles.takeButton, { backgroundColor: "#007AFF" }]}
+    onPress={() => {
+      Alert.alert(
+        "Reopen this spot?",
+        "This will mark the report as OPEN again so others can see it.",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Reopen",
+            onPress: async () => {
+              setSelectedMarker(null);
+              await reopenReport(data.id);
+            },
+          },
+        ],
+      );
+    }}
+  >
+    <Text style={styles.takeButtonText}>Unmark (Reopen)</Text>
+  </TouchableOpacity>
+)}
+
+{isCloud && data.status !== "resolved" && (() => {
+  const reportId = data.id;
+  const alreadyTakenSpot = hasManuallyTakenASpot;
+  const near = isNearMe(data.latitude, data.longitude);
+
+  const disabled =
+    !uid ||
+    isAutoTaking ||
+    alreadyTakenSpot ||
+    !near.ok;
+
+  const label = alreadyTakenSpot
+    ? "Already taken a spot"
+    : !near.ok
+      ? `Too far (${Math.round(near.dist)}m)`
+      : "Mark as Taken";
+
+  return (
+    <TouchableOpacity
+      style={[styles.takeButton, disabled && styles.takeButtonDisabled]}
+      disabled={disabled}
+      onPress={() => {
+        Alert.alert(
+          "Mark as taken?",
+          "This will resolve the report so others won't see it as open.",
+          [
+            { text: "Cancel", style: "cancel" },
+            {
+              text: "Mark Taken",
+              style: "destructive",
+              onPress: async () => {
+                setSelectedMarker(null);
+                await manualMarkTaken(reportId, data.latitude, data.longitude);
+              },
+            },
+          ],
+        );
+      }}
+    >
+      <Text style={[styles.takeButtonText, disabled && styles.takeButtonTextDisabled]}>
+        {label}
+      </Text>
+    </TouchableOpacity>
+  );
+})()}
+
+{/* NEW: Manual Mark Taken for LOCAL pins that have firestoreId */}
+{isCloud && data?.firestoreId && (() => {
+  const data = selectedMarker.data;
+  const reportId = data.firestoreId; // Firestore doc id
+  const near = isNearMe(data.latitude, data.longitude);
+
+  const disabled = !uid || isAutoTaking || !near.ok;
+
+  const label = !near.ok
+    ? `Too far (${Math.round(near.dist)}m)`
+    : "Mark as Taken";
+
+  return (
+    <TouchableOpacity
+      style={[
+        styles.takeButton,
+        disabled && styles.takeButtonDisabled,
+      ]}
+      disabled={disabled}
+      onPress={() => {
+        Alert.alert(
+          "Mark as taken?",
+          "This will resolve the report so others won't see it as open.",
+          [
+            { text: "Cancel", style: "cancel" },
+            {
+              text: "Mark Taken",
+              style: "destructive",
+              onPress: async () => {
+                setSelectedMarker(null);
+                await manualMarkTaken(reportId, data.latitude, data.longitude);
+              },
+            },
+          ],
+        );
+      }}
+    >
+      <Text style={[styles.takeButtonText, disabled && styles.takeButtonTextDisabled]}>
+        {label}
+      </Text>
+    </TouchableOpacity>
+  );
+})()}
 
                     <TouchableOpacity
                       style={styles.closeButton}
@@ -1764,4 +2158,22 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   undoBtnText: { fontWeight: "800" },
+  takeButton: {
+  backgroundColor: "#FF9500",
+  padding: 12,
+  borderRadius: 8,
+  marginTop: 10,
+},
+takeButtonText: {
+  color: "white",
+  textAlign: "center",
+  fontWeight: "bold",
+  fontSize: 16,
+},
+takeButtonDisabled: {
+  backgroundColor: "#BDBDBD",
+},
+takeButtonTextDisabled: {
+  color: "#EEEEEE",
+},
 });
