@@ -1,3 +1,6 @@
+// Firestore repo for parkingReports collection
+// Create/delete/update parking reports
+
 import {
   addDoc,
   collection,
@@ -102,6 +105,8 @@ export function subscribeToParkingReportsInBounds(
   return () => unsubs.forEach((u) => u());
 }
 
+// Normalizes and validates latitude/longitude values from both UI input and Firestore docs
+// Returns null if invalid to avoid crashing the app or rendering garbage markers
 function sanitizeCoord(lat: any, lon: any) {
   const latitude = typeof lat === "string" ? Number(lat) : lat;
   const longitude = typeof lon === "string" ? Number(lon) : lon;
@@ -150,7 +155,7 @@ export async function createParkingReport(data: ParkingReportCreate) {
   const geohash = geohashForLocation([coord.latitude, coord.longitude]);
 const docRef = await addDoc(collection(FIRESTORE_DB, "parkingReports"), {
   userId: user.uid,
-  createdBy: user.uid, // ✅ save who created it (same as userId)
+  createdBy: user.uid, 
   latitude: coord.latitude,
   longitude: coord.longitude,
   geohash,
@@ -225,7 +230,7 @@ export function subscribeToParkingReports(
           rate: data.rate ?? null,
           status: data.status ?? "open",
           createdAt: data.createdAt,
-          durationSeconds: data.durationSeconds ?? 30, // ADD: Include duration
+          durationSeconds: data.durationSeconds ?? 30, 
         });
       }
 
