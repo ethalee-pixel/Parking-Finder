@@ -1,3 +1,4 @@
+// login screen, handles sign in and account creation
 import React, { useRef, useState } from "react";
 import {
   View,
@@ -22,11 +23,14 @@ import {
 export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+
+  // loading state for sign in/sign up buttons
   const [loading, setLoading] = useState(false);
 
   const passwordRef = useRef<TextInput>(null);
   const auth = FIREBASE_AUTH;
 
+  // handles sign in with email and password, shows an alert on error
   const signIn = async () => {
     setLoading(true);
     try {
@@ -39,6 +43,7 @@ export default function Login() {
     }
   };
 
+  // handles account creation with email and password, shows an alert on error
   const signUp = async () => {
     setLoading(true);
     try {
@@ -52,6 +57,7 @@ export default function Login() {
   };
 
   return (
+      // dismisses the keyboard when tapping outside of the input fields
     <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
       <View style={styles.screen}>
         <KeyboardAvoidingView
@@ -80,6 +86,7 @@ export default function Login() {
                 returnKeyType="next"
                 editable={!loading}
                 onChangeText={setEmail}
+                // focuses the password field when submitting the email field
                 onSubmitEditing={() => passwordRef.current?.focus()}
               />
 
@@ -95,6 +102,7 @@ export default function Login() {
                 returnKeyType="done"
                 editable={!loading}
                 onChangeText={setPassword}
+                // submits the form when submitting the password field
                 onSubmitEditing={signIn}
               />
 
@@ -127,6 +135,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     padding: 16,
   },
+  //  card styles for the login form
   card: {
     width: "100%",
     maxWidth: 420,

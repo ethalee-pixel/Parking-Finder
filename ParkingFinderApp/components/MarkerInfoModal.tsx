@@ -1,3 +1,7 @@
+// MarkerInfoModal - shown when the user taps a map marker.
+// Displays spot details (age, time left, type) and action buttons:
+// Remove Pin, Mark as Taken, and Unmark (Reopen).
+
 import React from "react";
 import {
   Modal,
@@ -14,14 +18,23 @@ import { doc, updateDoc } from "firebase/firestore";
 import { FIRESTORE_DB } from "../FirebaseConfig";
 
 type Props = {
+  // The currently selected marker, or null if none is selected
   selectedMarker: { data: any; isCloud: boolean } | null;
+  // Current user's Firebase UID
   uid: string | null;
+  // True while a mark-taken operation is in progress (disables the button)
   isAutoTaking: boolean;
+  // True if the user has already manually taken one spot this session
   hasManuallyTakenASpot: boolean;
+  // Latest known user position for proximity checks
   userPos: { lat: number; lon: number } | null;
+  // Distance threshold in meters for marking a spot as taken
   NEARBY_TAKEN_RADIUS_M: number;
+  // The report ID the user currently has marked as taken
   myTakenReportId: string | null;
+  // The report ID that was manually taken (for undo unlock)
   manualTakenReportId: string | null;
+  // Set of all report IDs taken by the current user
   takenByMeIds: Set<string>;
   setSelectedMarker: (v: { data: any; isCloud: boolean } | null) => void;
   setHiddenCloudIds: (fn: (prev: Set<string>) => Set<string>) => void;
@@ -30,11 +43,7 @@ type Props = {
   setManualTakenReportId: (id: string | null) => void;
   setMyTakenReportId: (id: string | null) => void;
   onConfirmRemoveSpot: (id: string) => void;
-  onManualMarkTaken: (
-    reportId: string,
-    reportLat: number,
-    reportLon: number,
-  ) => void;
+  onManualMarkTaken: (reportId: string, reportLat: number, reportLon: number) => void;
   onReopenReport: (reportId: string) => void;
 };
 
@@ -59,6 +68,7 @@ export const MarkerInfoModal = ({
   onReopenReport,
 }: Props) => {
   return (
+    // Tapping the overlay background closes the modal
     <Modal
       visible={selectedMarker !== null}
       transparent
@@ -75,21 +85,21 @@ export const MarkerInfoModal = ({
             (() => {
               const data = selectedMarker.data;
               const isCloud = selectedMarker.isCloud;
+              // A resolved cloud report means someone (possibly us) has taken this spot
               const isResolved = isCloud && data.status === "resolved";
               const duration = data.durationSeconds || 30;
               const age = getAgeInSeconds(data.createdAt);
               const formattedTime = formatDuration(age);
               const timeRemaining = formatDuration(duration - age);
+              // At 90% of lifetime, the spot is considered expiring soon
               const warningThreshold = Math.floor(duration * 0.9);
               const warning = age >= warningThreshold;
 
               return (
                 <>
+                  {/* Title turns red when expiring soon */}
                   <Text
-                    style={[
-                      styles.markerModalTitle,
-                      warning && { color: "red" },
-                    ]}
+                    style={[styles.markerModalTitle, warning && { color: "red" }]}
                   >
                     {warning
                       ? "⚠️ Expiring Soon!"
@@ -97,17 +107,13 @@ export const MarkerInfoModal = ({
                         ? "Free Spot"
                         : `Paid: ${data.rate}`}
                   </Text>
-                  <Text style={styles.markerModalText}>
-                    Age: {formattedTime}
-                  </Text>
-                  <Text style={styles.markerModalText}>
-                    Time Left: {timeRemaining}
-                  </Text>
+                  <Text style={styles.markerModalText}>Age: {formattedTime}</Text>
+                  <Text style={styles.markerModalText}>Time Left: {timeRemaining}</Text>
 
+                  {/* Remove Pin button - only shown if user owns the spot */}
                   {(() => {
                     const canDeleteLocal = !isCloud;
-                    const canDeleteCloud =
-                      isCloud && !!uid && data.createdBy === uid;
+                    const canDeleteCloud = isCloud && !!uid && data.createdBy === uid;
 
                     if (!canDeleteLocal && !canDeleteCloud) return null;
 
@@ -118,25 +124,23 @@ export const MarkerInfoModal = ({
                           setSelectedMarker(null);
 
                           if (!isCloud) {
+                            // Local spot - use the confirm dialog
                             onConfirmRemoveSpot(data.id);
                             return;
                           }
 
+                          // Cloud spot - hide immediately then delete from Firestore
                           const cloudId = data.id;
-                          setHiddenCloudIds(
-                            (prev) => new Set(prev).add(cloudId),
-                          );
+                          setHiddenCloudIds((prev) => new Set(prev).add(cloudId));
 
                           deleteParkingReport(cloudId).catch((e: any) => {
+                            // If delete fails, unhide the marker
                             setHiddenCloudIds((prev) => {
                               const next = new Set(prev);
                               next.delete(cloudId);
                               return next;
                             });
-                            Alert.alert(
-                              "Delete failed",
-                              e?.message ?? "Could not delete.",
-                            );
+                            Alert.alert("Delete failed", e?.message ?? "Could not delete.");
                           });
                         }}
                       >
@@ -145,12 +149,10 @@ export const MarkerInfoModal = ({
                     );
                   })()}
 
+                  {/* Unmark (Reopen) button - shown when the spot is resolved */}
                   {selectedMarker?.isCloud && isResolved && (
                     <TouchableOpacity
-                      style={[
-                        styles.takeButton,
-                        { backgroundColor: "#007AFF" },
-                      ]}
+                      style={[styles.takeButton, { backgroundColor: "#007AFF" }]}
                       onPress={() => {
                         Alert.alert(
                           "Reopen this spot?",
@@ -168,30 +170,22 @@ export const MarkerInfoModal = ({
                         );
                       }}
                     >
-                      <Text style={styles.takeButtonText}>
-                        Unmark (Reopen)
-                      </Text>
+                      <Text style={styles.takeButtonText}>Unmark (Reopen)</Text>
                     </TouchableOpacity>
                   )}
 
+                  {/* Mark as Taken button - shown for open cloud reports.
+                      Disabled if: not signed in, already taken a spot, or too far away. */}
                   {isCloud &&
                     data.status !== "resolved" &&
                     (() => {
                       const reportId = data.id;
                       const alreadyTakenSpot = hasManuallyTakenASpot;
-                      const near = isNearMe(
-                        userPos,
-                        data.latitude,
-                        data.longitude,
-                        NEARBY_TAKEN_RADIUS_M,
-                      );
+                      const near = isNearMe(userPos, data.latitude, data.longitude, NEARBY_TAKEN_RADIUS_M);
 
-                      const disabled =
-                        !uid ||
-                        isAutoTaking ||
-                        alreadyTakenSpot ||
-                        !near.ok;
+                      const disabled = !uid || isAutoTaking || alreadyTakenSpot || !near.ok;
 
+                      // Show a context-aware label explaining why the button is disabled
                       const label = alreadyTakenSpot
                         ? "Already taken a spot"
                         : !near.ok
@@ -200,10 +194,7 @@ export const MarkerInfoModal = ({
 
                       return (
                         <TouchableOpacity
-                          style={[
-                            styles.takeButton,
-                            disabled && styles.takeButtonDisabled,
-                          ]}
+                          style={[styles.takeButton, disabled && styles.takeButtonDisabled]}
                           disabled={disabled}
                           onPress={() => {
                             Alert.alert(
@@ -216,40 +207,27 @@ export const MarkerInfoModal = ({
                                   style: "destructive",
                                   onPress: async () => {
                                     setSelectedMarker(null);
-                                    await onManualMarkTaken(
-                                      reportId,
-                                      data.latitude,
-                                      data.longitude,
-                                    );
+                                    await onManualMarkTaken(reportId, data.latitude, data.longitude);
                                   },
                                 },
                               ],
                             );
                           }}
                         >
-                          <Text
-                            style={[
-                              styles.takeButtonText,
-                              disabled && styles.takeButtonTextDisabled,
-                            ]}
-                          >
+                          <Text style={[styles.takeButtonText, disabled && styles.takeButtonTextDisabled]}>
                             {label}
                           </Text>
                         </TouchableOpacity>
                       );
                     })()}
 
+                  {/* Mark as Taken button for local spots that also have a Firestore ID */}
                   {isCloud &&
                     data?.firestoreId &&
                     (() => {
                       const data = selectedMarker.data;
                       const reportId = data.firestoreId;
-                      const near = isNearMe(
-                        userPos,
-                        data.latitude,
-                        data.longitude,
-                        NEARBY_TAKEN_RADIUS_M,
-                      );
+                      const near = isNearMe(userPos, data.latitude, data.longitude, NEARBY_TAKEN_RADIUS_M);
 
                       const disabled = !uid || isAutoTaking || !near.ok;
 
@@ -259,10 +237,7 @@ export const MarkerInfoModal = ({
 
                       return (
                         <TouchableOpacity
-                          style={[
-                            styles.takeButton,
-                            disabled && styles.takeButtonDisabled,
-                          ]}
+                          style={[styles.takeButton, disabled && styles.takeButtonDisabled]}
                           disabled={disabled}
                           onPress={() => {
                             Alert.alert(
@@ -275,23 +250,14 @@ export const MarkerInfoModal = ({
                                   style: "destructive",
                                   onPress: async () => {
                                     setSelectedMarker(null);
-                                    await onManualMarkTaken(
-                                      reportId,
-                                      data.latitude,
-                                      data.longitude,
-                                    );
+                                    await onManualMarkTaken(reportId, data.latitude, data.longitude);
                                   },
                                 },
                               ],
                             );
                           }}
                         >
-                          <Text
-                            style={[
-                              styles.takeButtonText,
-                              disabled && styles.takeButtonTextDisabled,
-                            ]}
-                          >
+                          <Text style={[styles.takeButtonText, disabled && styles.takeButtonTextDisabled]}>
                             {label}
                           </Text>
                         </TouchableOpacity>
@@ -344,6 +310,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     color: "#333",
   },
+  // Red destructive button for removing a pin
   removeButton: {
     backgroundColor: "#FF3B30",
     padding: 12,
@@ -365,6 +332,7 @@ const styles = StyleSheet.create({
     textAlign: "center",
     fontSize: 16,
   },
+  // Orange button for marking a spot as taken
   takeButton: {
     backgroundColor: "#FF9500",
     padding: 12,
@@ -377,6 +345,7 @@ const styles = StyleSheet.create({
     fontWeight: "bold",
     fontSize: 16,
   },
+  // Grey style when the take button is disabled
   takeButtonDisabled: {
     backgroundColor: "#BDBDBD",
   },

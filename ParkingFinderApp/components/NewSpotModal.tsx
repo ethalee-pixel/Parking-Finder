@@ -1,3 +1,8 @@
+// NewSpotModal - the modal form for creating a new parking spot.
+// Triggered by a long-press on the map. Lets the user pick free/paid,
+// set a rate (if paid), and choose a duration via hour/minute/second pickers.
+// On save, creates the report in Firestore and immediately marks it as taken by the creator.
+
 import React, { useState } from "react";
 import {
   Modal,
@@ -19,8 +24,10 @@ import { ParkingSpot } from "../types/parking";
 
 type Props = {
   showModal: boolean;
+  // The coordinates from the long-press that triggered this modal
   pendingCoord: { latitude: number; longitude: number } | null;
   uid: string | null;
+  // True while the Firestore write is in flight (disables the save button)
   isCreatingSpot: boolean;
   setIsCreatingSpot: (v: boolean) => void;
   setShowModal: (v: boolean) => void;
@@ -52,12 +59,16 @@ export const NewSpotModal = ({
   setAutoTakenBanner,
   showUndoBanner,
 }: Props) => {
+  // Whether this is a free or paid spot
   const [spotType, setSpotType] = useState<"free" | "paid">("free");
+  // The rate text shown for paid spots (e.g. "$2/hr")
   const [rate, setRate] = useState("");
+  // Duration picker values
   const [hours, setHours] = useState(0);
   const [minutes, setMinutes] = useState(0);
-  const [seconds, setSeconds] = useState(30);
+  const [seconds, setSeconds] = useState(30); // Default to 30 seconds
 
+  // Resets all modal state and closes the modal
   const closeModal = () => {
     Keyboard.dismiss();
     setShowModal(false);
@@ -67,9 +78,12 @@ export const NewSpotModal = ({
     setSeconds(30);
   };
 
+  // Creates the parking report in Firestore and immediately marks it as taken by the creator.
+  // Falls back to saving as a local spot if the Firestore write fails.
   const saveSpot = async () => {
     if (!pendingCoord) return;
 
+    // Guard against double-tap
     if (isCreatingSpot) return;
 
     const totalSeconds = hours * 3600 + minutes * 60 + seconds;
@@ -84,6 +98,7 @@ export const NewSpotModal = ({
     const timestamp = Date.now();
     const id = `spot-${timestamp}-${Math.random()}`;
 
+    // Build the local spot object (used as fallback if Firestore fails)
     const newSpot: ParkingSpot = {
       id,
       latitude: pendingCoord.latitude,
@@ -95,11 +110,14 @@ export const NewSpotModal = ({
       durationSeconds: totalSeconds,
     };
 
+    // Close the modal immediately so the UI feels responsive
     closeModal();
 
+    // Schedule a local notification warning before the spot expires
     await scheduleSpotNotification(id, totalSeconds, spotType);
 
     try {
+      // Save the report to Firestore
       const firestoreId = await createParkingReport({
         latitude: newSpot.latitude,
         longitude: newSpot.longitude,
@@ -108,6 +126,7 @@ export const NewSpotModal = ({
         durationSeconds: totalSeconds,
       });
 
+      // Immediately mark the spot as taken by the creator so it shows as a red T
       await markReportTaken(firestoreId, uid!);
 
       setMyTakenReportId(firestoreId);
@@ -117,14 +136,18 @@ export const NewSpotModal = ({
         return next;
       });
 
+      // Lock the one-taken-spot limit since the creator is "taking" their own spot
       setHasManuallyTakenASpot(true);
       setManualTakenReportId(firestoreId);
 
+      // Show undo banner so the creator can reverse if they made a mistake
       showUndoBanner(firestoreId);
 
+      // Attach the Firestore ID to the local spot object for deletion purposes
       newSpot.firestoreId = firestoreId;
 
       try {
+        // Second markReportTaken call ensures state is fully synced
         await markReportTaken(firestoreId, uid!);
 
         setTakenByMeIds((prev) => new Set(prev).add(firestoreId));
@@ -143,12 +166,14 @@ export const NewSpotModal = ({
         );
       }
 
+      // Clear lastReported since we no longer need auto-taken tracking for this spot
       setLastReported(null);
     } catch (e: any) {
       Alert.alert(
         "Firestore save failed",
         e?.message ? String(e.message) : JSON.stringify(e),
       );
+      // Fall back to keeping the spot locally if the cloud save failed
       setSpots((prev) => [...prev, newSpot]);
     } finally {
       setIsCreatingSpot(false);
@@ -157,16 +182,15 @@ export const NewSpotModal = ({
 
   return (
     <Modal visible={showModal} transparent animationType="slide">
+      {/* Shift content up when keyboard appears */}
       <KeyboardAvoidingView behavior="padding" style={styles.modalOverlay}>
         <View style={styles.modal}>
           <Text style={styles.modalTitle}>New Parking Spot</Text>
 
+          {/* Free / Paid type selector */}
           <View style={styles.typeRow}>
             <TouchableOpacity
-              style={[
-                styles.typeButton,
-                spotType === "free" && styles.freeSelected,
-              ]}
+              style={[styles.typeButton, spotType === "free" && styles.freeSelected]}
               onPress={() => setSpotType("free")}
               disabled={isCreatingSpot}
             >
@@ -174,10 +198,7 @@ export const NewSpotModal = ({
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={[
-                styles.typeButton,
-                spotType === "paid" && styles.paidSelected,
-              ]}
+              style={[styles.typeButton, spotType === "paid" && styles.paidSelected]}
               onPress={() => setSpotType("paid")}
               disabled={isCreatingSpot}
             >
@@ -185,6 +206,7 @@ export const NewSpotModal = ({
             </TouchableOpacity>
           </View>
 
+          {/* Rate input only shown when "Paid" is selected */}
           {spotType === "paid" && (
             <TextInput
               placeholder="Rate"
@@ -196,29 +218,21 @@ export const NewSpotModal = ({
           )}
 
           <Text style={styles.durationLabel}>Duration:</Text>
+
+          {/* Duration picker: three scrollable columns for hours, minutes, seconds */}
           <View style={styles.pickerContainer}>
+            {/* Hours column (0-24) */}
             <View style={styles.pickerColumn}>
               <Text style={styles.pickerColumnLabel}>Hours</Text>
-              <ScrollView
-                style={styles.picker}
-                showsVerticalScrollIndicator={false}
-              >
+              <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
                 {Array.from({ length: 25 }, (_, i) => i).map((h) => (
                   <TouchableOpacity
                     key={`h-${h}`}
-                    style={[
-                      styles.pickerItem,
-                      hours === h && styles.pickerItemSelected,
-                    ]}
+                    style={[styles.pickerItem, hours === h && styles.pickerItemSelected]}
                     onPress={() => setHours(h)}
                     disabled={isCreatingSpot}
                   >
-                    <Text
-                      style={[
-                        styles.pickerItemText,
-                        hours === h && styles.pickerItemTextSelected,
-                      ]}
-                    >
+                    <Text style={[styles.pickerItemText, hours === h && styles.pickerItemTextSelected]}>
                       {h}
                     </Text>
                   </TouchableOpacity>
@@ -226,28 +240,18 @@ export const NewSpotModal = ({
               </ScrollView>
             </View>
 
+            {/* Minutes column (0-59) */}
             <View style={styles.pickerColumn}>
               <Text style={styles.pickerColumnLabel}>Minutes</Text>
-              <ScrollView
-                style={styles.picker}
-                showsVerticalScrollIndicator={false}
-              >
+              <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
                 {Array.from({ length: 60 }, (_, i) => i).map((m) => (
                   <TouchableOpacity
                     key={`m-${m}`}
-                    style={[
-                      styles.pickerItem,
-                      minutes === m && styles.pickerItemSelected,
-                    ]}
+                    style={[styles.pickerItem, minutes === m && styles.pickerItemSelected]}
                     onPress={() => setMinutes(m)}
                     disabled={isCreatingSpot}
                   >
-                    <Text
-                      style={[
-                        styles.pickerItemText,
-                        minutes === m && styles.pickerItemTextSelected,
-                      ]}
-                    >
+                    <Text style={[styles.pickerItemText, minutes === m && styles.pickerItemTextSelected]}>
                       {m}
                     </Text>
                   </TouchableOpacity>
@@ -255,28 +259,18 @@ export const NewSpotModal = ({
               </ScrollView>
             </View>
 
+            {/* Seconds column (0-59) */}
             <View style={styles.pickerColumn}>
               <Text style={styles.pickerColumnLabel}>Seconds</Text>
-              <ScrollView
-                style={styles.picker}
-                showsVerticalScrollIndicator={false}
-              >
+              <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
                 {Array.from({ length: 60 }, (_, i) => i).map((s) => (
                   <TouchableOpacity
                     key={`s-${s}`}
-                    style={[
-                      styles.pickerItem,
-                      seconds === s && styles.pickerItemSelected,
-                    ]}
+                    style={[styles.pickerItem, seconds === s && styles.pickerItemSelected]}
                     onPress={() => setSeconds(s)}
                     disabled={isCreatingSpot}
                   >
-                    <Text
-                      style={[
-                        styles.pickerItemText,
-                        seconds === s && styles.pickerItemTextSelected,
-                      ]}
-                    >
+                    <Text style={[styles.pickerItemText, seconds === s && styles.pickerItemTextSelected]}>
                       {s}
                     </Text>
                   </TouchableOpacity>
@@ -285,10 +279,12 @@ export const NewSpotModal = ({
             </View>
           </View>
 
+          {/* Live preview of the total selected duration */}
           <Text style={styles.durationPreview}>
             Total: {formatDuration(hours * 3600 + minutes * 60 + seconds)}
           </Text>
 
+          {/* Save button - dims while saving */}
           <TouchableOpacity
             style={[styles.saveButton, isCreatingSpot && { opacity: 0.6 }]}
             onPress={saveSpot}
@@ -341,8 +337,8 @@ const styles = StyleSheet.create({
     width: "45%",
     alignItems: "center",
   },
-  freeSelected: { backgroundColor: "#c8e6c9" },
-  paidSelected: { backgroundColor: "#ffcdd2" },
+  freeSelected: { backgroundColor: "#c8e6c9" },  // Green tint when free is selected
+  paidSelected: { backgroundColor: "#ffcdd2" },  // Red tint when paid is selected
   input: {
     borderWidth: 1,
     borderColor: "#ccc",
@@ -386,6 +382,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: "#eee",
   },
+  // Highlighted blue background for the selected value
   pickerItemSelected: {
     backgroundColor: "#007AFF",
   },

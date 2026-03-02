@@ -1,3 +1,4 @@
+// modal that shows the user's report history, with filters and sorting options
 import React, { useState, useMemo } from "react";
 import {
   Modal,
@@ -27,6 +28,7 @@ export const HistoryModal = ({
   const [historyType, setHistoryType] = useState<"all" | "free" | "paid">(
     "all",
   );
+  // added status, range, and sort filters to the history modal
   const [historyStatus, setHistoryStatus] = useState<
     "all" | "open" | "resolved"
   >("all");
@@ -36,7 +38,7 @@ export const HistoryModal = ({
   const [historySort, setHistorySort] = useState<
     "newest" | "oldest" | "paidFirst" | "freeFirst"
   >("newest");
-
+    // useMemo to filter and sort the user's reports based on the selected filters and sorting options
   const filteredMyReports = useMemo(() => {
     const now = Date.now();
 
@@ -51,6 +53,7 @@ export const HistoryModal = ({
       return true;
     };
 
+    // filter the user's reports based on the selected type, status, and range filters
     let arr = myReports.filter((r) => {
       if (historyType !== "all" && r.type !== historyType) return false;
       if (historyStatus !== "all" && r.status !== historyStatus) return false;
@@ -58,6 +61,7 @@ export const HistoryModal = ({
       return true;
     });
 
+    // sort the filtered reports based on the selected sorting option
     arr.sort((a, b) => {
       const at = getTimeInMillis(a.createdAt);
       const bt = getTimeInMillis(b.createdAt);
@@ -65,11 +69,13 @@ export const HistoryModal = ({
       if (historySort === "newest") return bt - at;
       if (historySort === "oldest") return at - bt;
 
+      // for paidFirst and freeFirst, sort by type first, then by createdAt
       if (historySort === "paidFirst") {
         if (a.type !== b.type) return a.type === "paid" ? -1 : 1;
         return bt - at;
       }
 
+      // for freeFirst, sort by type first, then by createdAt
       if (historySort === "freeFirst") {
         if (a.type !== b.type) return a.type === "free" ? -1 : 1;
         return bt - at;
@@ -86,7 +92,7 @@ export const HistoryModal = ({
       <View style={styles.modalOverlay}>
         <View style={[styles.modal, { maxHeight: "80%" }]}>
           <Text style={styles.modalTitle}>My Report History</Text>
-
+            // filter options for the history modal, including type, status, range, and sort filters
           <View style={styles.filterBlock}>
             <Text style={styles.filterLabel}>Type</Text>
             <View style={styles.pillRow}>
@@ -239,6 +245,7 @@ export const HistoryModal = ({
               const duration = item.durationSeconds || 30;
               const isExpired = ageSeconds >= duration;
 
+              // format the duration text to show how long the report was active for, or how long ago it expired
               const durationText = isExpired
                 ? formatDuration(duration)
                 : formatDuration(ageSeconds);
@@ -252,6 +259,7 @@ export const HistoryModal = ({
                   : `Paid Spot${item.rate ? `: ${item.rate}` : ""}`;
 
               return (
+                // each report row in the history list, showing the type, status, and duration of the report, and allowing the user to tap on it to view it on the map (if it's not expired)
                 <TouchableOpacity
                   style={[
                     styles.historyRow,

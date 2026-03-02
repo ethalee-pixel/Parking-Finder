@@ -1,3 +1,4 @@
+// all ui elements that appear on top of the map, such as the busy indicator, undo banner, color guide, history button, and auto-taken banner
 import React from "react";
 import {
   View,
@@ -15,12 +16,14 @@ type Props = {
     expiresAt: number;
     isProcessing: boolean;
   } | null;
+
+    // banner text to show after auto-taking a spot, e.g. "Marked as TAKEN (you arrived and parked)."
   autoTakenBanner: string | null;
   onUndo: () => void;
   onShowHistory: () => void;
   onSignOut: () => void;
 };
-
+// the MapOverlays component renders various UI elements that appear on top of the map, such as the busy indicator when creating a spot or auto-taking, the undo banner after auto-taking, the color guide for spot statuses, the history button, and the auto-taken banner
 export const MapOverlays = ({
   isCreatingSpot,
   isAutoTaking,
@@ -92,7 +95,7 @@ export const MapOverlays = ({
     </>
   );
 };
-
+    // styles for the various UI elements in the MapOverlays component, such as the busy pill, undo banner, color guide, history button, and auto-taken banner
 const styles = StyleSheet.create({
   busyPill: {
     position: "absolute",

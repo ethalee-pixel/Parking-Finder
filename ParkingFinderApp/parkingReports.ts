@@ -118,13 +118,13 @@ export type ParkingReportCreate = {
   longitude: number;
   type: "free" | "paid";
   rate?: string;
-  durationSeconds?: number; // ADD: Custom duration for parking spot
+  durationSeconds?: number; 
 };
 
 export type ParkingReport = {
   id: string;
   userId: string;
-  createdBy?: string;   // ✅ ADD THIS
+  createdBy?: string; 
   latitude: number;
   longitude: number;
   geohash: string;
@@ -263,7 +263,7 @@ export function subscribeToMyParkingReports(
       reports.push({
         id: d.id,
         userId: data.userId,
-        createdBy: data.createdBy, // ✅ ADD THIS
+        createdBy: data.createdBy, 
         latitude: coord.latitude,
         longitude: coord.longitude,
         geohash: data.geohash,
