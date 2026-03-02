@@ -1167,7 +1167,28 @@ const renderTakenTMarker = (
     </Marker>
   );
 };
+const centerOnUser = async () => {
+  try {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== "granted") return;
 
+    const loc = await Location.getCurrentPositionAsync({
+      accuracy: Location.Accuracy.Highest,
+    });
+
+    const userRegion: Region = {
+      latitude: loc.coords.latitude,
+      longitude: loc.coords.longitude,
+      latitudeDelta: 0.005,
+      longitudeDelta: 0.005,
+    };
+
+    setRegion(userRegion); // keep your state updated
+    mapRef.current?.animateToRegion(userRegion, 700);
+  } catch (e) {
+    console.log("centerOnUser failed:", e);
+  }
+};
 const renderMarker = (data: any, isCloud: boolean) => {
   const coord = safeCoord(data.latitude, data.longitude);
   if (!coord) return null;
@@ -1214,12 +1235,16 @@ if (isCloud && data.status === "resolved") {
       <MapView
         ref={mapRef}
         style={styles.map}
-        initialRegion={region}
+        initialRegion={region}          // ✅ use this
         showsUserLocation
         showsMyLocationButton={true}
         followsUserLocation={false}
         onLongPress={handleMapLongPress}
         onRegionChangeComplete={handleRegionChangeComplete}
+        onMapReady={() => {
+          // try again once the map is actually ready
+          centerOnUser();
+        }}
       >
         {spots.map((spot) => renderMarker(spot, false))}
 
