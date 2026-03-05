@@ -36,6 +36,8 @@ import { MapOverlays } from '../../components/MapOverlays';
 import { MarkerInfoModal } from '../../components/MarkerInfoModal';
 import { NewSpotModal } from '../../components/NewSpotModal';
 
+import { useProximityAutoTake } from "../../hooks/useProximityAutoTake";
+
 // How close (in meters) the user must be to manually mark a spot as taken.
 const NEARBY_TAKEN_RADIUS_M = 75;
 
@@ -153,6 +155,7 @@ export default function MapScreen() {
   // Temporary banner shown after auto-taking a spot.
   const [autoTakenBanner, setAutoTakenBanner] = useState<string | null>(null);
 
+  
   // Undo banner state + undo handler.
   const { undoState, showUndoBanner, undoAutoTaken } = useUndoState(
     myTakenReportId,
@@ -177,6 +180,29 @@ export default function MapScreen() {
     setAutoTakenBanner,
     showUndoBanner,
     userPosRef,
+  });
+
+    useProximityAutoTake({
+    uid,
+    cloudReports,
+    userPosRef,
+
+    isAutoTaking,
+    setIsAutoTaking,
+
+    hasManuallyTakenASpot,
+    setHasManuallyTakenASpot,
+
+    setManualTakenReportId,
+    myTakenReportId,
+    setMyTakenReportId,
+    setTakenByMeIds,
+
+    hiddenCloudIds,
+    autoTakeRadiusM: 25, // change radius if you want
+
+    setAutoTakenBanner,
+    showUndoBanner,
   });
 
   // Called every tick (1s). Sends expiry warning alerts and removes expired local spots.
@@ -274,7 +300,10 @@ export default function MapScreen() {
       Alert.alert('Not signed in', 'Please sign in to mark a spot as taken.');
       return;
     }
-
+    if (myTakenReportId) {
+  Alert.alert("Limit reached", "You already have a taken spot. Reopen/undo it first.");
+  return;
+    }
     if (hasManuallyTakenASpot) {
       Alert.alert('Limit reached', 'You already marked one spot as taken.');
       return;
@@ -296,7 +325,7 @@ export default function MapScreen() {
 
     setIsAutoTaking(true);
     try {
-      await markReportTaken(reportId, uid);
+      await markReportTaken(reportId);
 
       setMyTakenReportId(reportId);
       setTakenByMeIds((prev) => {
@@ -421,14 +450,15 @@ export default function MapScreen() {
     const coord = safeCoord(data.latitude, data.longitude);
     if (!coord) return null;
 
-    if (isCloud && isCloudReport(data) && data.status === 'resolved') {
-      const takenByMe = data.resolvedBy === uid || takenByMeIds.has(data.id);
-      if (!takenByMe) return null;
+if (isCloud && isCloudReport(data) && data.status === "resolved") {
+  // ✅ show only your current active taken report
+  const takenByMe = data.id === myTakenReportId;
+  if (!takenByMe) return null;
 
-      return renderTakenTMarker(data.id, coord.latitude, coord.longitude, () => {
-        setSelectedMarker({ data, isCloud: true });
-      });
-    }
+  return renderTakenTMarker(data.id, coord.latitude, coord.longitude, () => {
+    setSelectedMarker({ data, isCloud: true });
+  });
+}
 
     const durationSeconds = getDurationSeconds(data);
     const { color, expired } = getPinStatus(data.createdAt, durationSeconds);
@@ -762,6 +792,7 @@ export default function MapScreen() {
         setLastReported={setLastReported}
         setAutoTakenBanner={setAutoTakenBanner}
         showUndoBanner={showUndoBanner}
+        myTakenReportId={myTakenReportId}
       />
     </View>
   );

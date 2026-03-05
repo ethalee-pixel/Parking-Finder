@@ -195,14 +195,17 @@ export async function deleteParkingReport(reportId: string): Promise<void> {
   console.log('Deleted parking report from Firestore:', reportId);
 }
 
-export async function markReportTaken(reportId: string, uid: string): Promise<void> {
-  await updateDoc(doc(FIRESTORE_DB, 'parkingReports', reportId), {
-    status: 'resolved',
-    resolvedBy: uid,
+export async function markReportTaken(reportId: string) {
+  const user = FIREBASE_AUTH.currentUser;
+  if (!user) throw new Error("Not logged in");
+
+  await updateDoc(doc(FIRESTORE_DB, "parkingReports", reportId), {
+    status: "resolved",
+    resolvedBy: user.uid,
     resolvedAt: serverTimestamp(),
   });
 
-  console.log('Marked parking report as resolved (taken):', reportId);
+  console.log("Marked parking report as resolved (taken):", reportId);
 }
 
 // Subscribes to parking reports (ordered by createdAt desc).

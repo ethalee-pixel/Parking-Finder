@@ -37,6 +37,7 @@ type Props = {
   uid: string | null;
 
   // True while a Firestore write is in flight (disables actions).
+  myTakenReportId: string | null;
   isCreatingSpot: boolean;
 
   setIsCreatingSpot: (v: boolean) => void;
@@ -70,6 +71,7 @@ export function NewSpotModal({
   showModal,
   pendingCoord,
   uid,
+  myTakenReportId,
   isCreatingSpot,
   setIsCreatingSpot,
   setShowModal,
@@ -172,18 +174,25 @@ export function NewSpotModal({
           'OSM check failed (network/rate-limit). Spot was allowed anyway.',
         );
       }
+// Create a firestoreId
+const firestoreId = await createParkingReport({
+  latitude: newSpot.latitude,
+  longitude: newSpot.longitude,
+  type: newSpot.type,
+  rate: newSpot.rate,
+  durationSeconds: totalSeconds,
+});
 
-      // Create a Firestore report.
-      const firestoreId = await createParkingReport({
-        latitude: newSpot.latitude,
-        longitude: newSpot.longitude,
-        type: newSpot.type,
-        rate: newSpot.rate,
-        durationSeconds: totalSeconds,
-      });
+// 🚨 Prevent multiple taken pins
+if (myTakenReportId) {
+  setAutoTakenBanner("Placed spot (left OPEN because you already have a taken spot).");
+  return; // leaves it open
+}
 
-      // Mark it as taken immediately so it shows as a red T for the creator.
-      await markReportTaken(firestoreId, uid);
+await markReportTaken(firestoreId); // ✅ only once
+
+// Mark it as taken immediately so it shows as a red T for the creator.
+await markReportTaken(firestoreId);
 
       // Record taken state for rendering + undo logic.
       setMyTakenReportId(firestoreId);
