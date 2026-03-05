@@ -350,46 +350,68 @@ export default function MapScreen() {
   };
 
   // Shows a confirmation dialog before removing a local spot and its cloud copy (if any).
-  const confirmRemoveSpot = (id: string) => {
-    const spot = spots.find((s) => s.id === id);
+// Shows a confirmation dialog before removing a local spot and its cloud copy (if any).
+const confirmRemoveSpot = (id: string) => {
+  const spot = spots.find((s) => s.id === id);
 
-    Alert.alert('Remove Spot?', 'Permanently remove this marker?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Remove',
-        style: 'destructive',
-        onPress: async () => {
-          setSpots((prev) => prev.filter((s) => s.id !== id));
+  Alert.alert("Remove Spot?", "Permanently remove this marker?", [
+    { text: "Cancel", style: "cancel" },
+    {
+      text: "Remove",
+      style: "destructive",
+      onPress: async () => {
+        // Remove locally right away
+        setSpots((prev) => prev.filter((s) => s.id !== id));
 
-          const cloudId = spot?.firestoreId;
-          if (!cloudId) return;
+        const cloudId = spot?.firestoreId;
 
-          // Hide immediately to prevent flicker while Firestore updates.
+        // ✅ If this spot was your "taken" one, immediately unlock taking another
+        if (cloudId) {
+          if (myTakenReportId === cloudId) {
+            setMyTakenReportId(null);
+          }
+
+          if (manualTakenReportId === cloudId) {
+            setHasManuallyTakenASpot(false);
+            setManualTakenReportId(null);
+          }
+
+          setTakenByMeIds((prev) => {
+            const next = new Set(prev);
+            next.delete(cloudId);
+            return next;
+          });
+        }
+
+        // If there is no cloud doc, we're done
+        if (!cloudId) return;
+
+        // Hide immediately to prevent flicker while Firestore updates.
+        setHiddenCloudIds((prev) => {
+          const next = new Set(prev);
+          next.add(cloudId);
+          return next;
+        });
+
+        try {
+          await deleteParkingReport(cloudId);
+        } catch (err: unknown) {
+          // If deletion fails, unhide and notify.
           setHiddenCloudIds((prev) => {
             const next = new Set(prev);
-            next.add(cloudId);
+            next.delete(cloudId);
             return next;
           });
 
-          try {
-            await deleteParkingReport(cloudId);
-          } catch (err: unknown) {
-            // If deletion fails, unhide and notify.
-            setHiddenCloudIds((prev) => {
-              const next = new Set(prev);
-              next.delete(cloudId);
-              return next;
-            });
-
-            const message =
-              (err as { message?: string })?.message ??
-              'Could not delete this spot from the cloud.';
-            Alert.alert('Delete failed', message);
-          }
-        },
+          const message =
+            (err as { message?: string })?.message ??
+            "Could not delete this spot from the cloud.";
+          Alert.alert("Delete failed", message);
+        }
       },
-    ]);
-  };
+    },
+  ]);
+};
 
   // Signs the current user out of Firebase Auth.
   const handleSignOut = async () => {
@@ -658,15 +680,53 @@ if (isCloud && isCloudReport(data) && data.status === "resolved") {
   }, []);
 
   // Verify our taken report is still resolved by us. If not, clear the local tracking.
-  useEffect(() => {
-    if (!uid || !myTakenReportId) return;
+useEffect(() => {
+  if (!uid || !myTakenReportId) return;
 
-    const report = cloudReports.find((x) => x.id === myTakenReportId);
-    if (!report) return;
+  const report = cloudReports.find((x) => x.id === myTakenReportId);
 
-    const stillMine = report.status === 'resolved' && report.resolvedBy === uid;
-    if (!stillMine) setMyTakenReportId(null);
-  }, [cloudReports, uid, myTakenReportId]);
+  // ✅ If the report is missing (deleted or out of bounds), unlock the user
+  if (!report) {
+    setMyTakenReportId(null);
+
+    setTakenByMeIds((prev) => {
+      const next = new Set(prev);
+      next.delete(myTakenReportId);
+      return next;
+    });
+
+    if (manualTakenReportId === myTakenReportId) {
+      setHasManuallyTakenASpot(false);
+      setManualTakenReportId(null);
+    }
+    return;
+  }
+
+  const stillMine = report.status === "resolved" && report.resolvedBy === uid;
+
+  if (!stillMine) {
+    setMyTakenReportId(null);
+
+    setTakenByMeIds((prev) => {
+      const next = new Set(prev);
+      next.delete(myTakenReportId);
+      return next;
+    });
+
+    if (manualTakenReportId === myTakenReportId) {
+      setHasManuallyTakenASpot(false);
+      setManualTakenReportId(null);
+    }
+  }
+}, [
+  cloudReports,
+  uid,
+  myTakenReportId,
+  manualTakenReportId,
+  setHasManuallyTakenASpot,
+  setManualTakenReportId,
+  setTakenByMeIds,
+]);
 
   // Persist local spots whenever they change.
   useEffect(() => {
