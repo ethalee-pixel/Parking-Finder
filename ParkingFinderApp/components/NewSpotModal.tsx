@@ -157,10 +157,12 @@ export function NewSpotModal({
     // Close the modal immediately for responsiveness.
     closeModal();
 
-    // Schedule an expiry warning notification.
-    await scheduleSpotNotification(localId, totalSeconds, spotType);
-
     try {
+      // Notification scheduling is best-effort and should not block pin creation.
+      void scheduleSpotNotification(localId, totalSeconds, spotType).catch((err: unknown) => {
+        console.warn('Failed to schedule spot notification:', err);
+      });
+
       await withTimeout(
         createParkingReport({
           latitude: newSpot.latitude,
