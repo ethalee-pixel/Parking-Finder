@@ -19,11 +19,13 @@ type Props = {
   undoState: UndoState | null;
 
   autoTakenBanner: string | null;
+  showUnstuckButton: boolean;
 
   onUndo: () => void;
   onShowHistory: () => void;
   onSignOut: () => void;
   onRecenter: () => void;
+  onUnstuck: () => void;
 };
 
 export function MapOverlays({
@@ -32,10 +34,12 @@ export function MapOverlays({
   isValidatingPlacement,
   undoState,
   autoTakenBanner,
+  showUnstuckButton,
   onUndo,
   onShowHistory,
   onSignOut,
   onRecenter,
+  onUnstuck,
 }: Props) {
   const undoSecondsLeft = useMemo(() => {
     if (!undoState) return 0;
@@ -86,6 +90,12 @@ export function MapOverlays({
       <TouchableOpacity style={[styles.actionBtn, styles.signOutBtn]} onPress={onSignOut}>
         <Text style={styles.actionBtnText}>Sign Out</Text>
       </TouchableOpacity>
+
+      {showUnstuckButton && (
+        <TouchableOpacity style={[styles.actionBtn, styles.unstuckBtn]} onPress={onUnstuck}>
+          <Text style={styles.actionBtnText}>Unstuck</Text>
+        </TouchableOpacity>
+      )}
 
       <TouchableOpacity
         style={styles.recenterBtn}
@@ -194,6 +204,9 @@ const styles = StyleSheet.create({
   },
   signOutBtn: {
     top: 100,
+  },
+  unstuckBtn: {
+    top: 150,
   },
   actionBtnText: {
     fontWeight: 'bold',

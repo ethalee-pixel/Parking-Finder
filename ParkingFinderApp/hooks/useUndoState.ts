@@ -1,4 +1,4 @@
-﻿// useUndoState - manages the undo banner shown after a spot is marked taken.
+// useUndoState - manages the undo banner shown after a spot is marked taken.
 // Gives the user a 45-second window to reverse the action.
 
 import { useEffect, useRef, useState } from 'react';
@@ -20,6 +20,7 @@ type UseUndoStateResult = {
   undoState: UndoState;
   showUndoBanner: (reportId: string, message?: string) => void;
   undoAutoTaken: () => Promise<void>;
+  clearUndoBanner: () => void;
 };
 
 export function useUndoState(
@@ -34,6 +35,15 @@ export function useUndoState(
 
   // Timer handle for auto-dismissing the banner
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearUndoBanner = () => {
+    setUndoState(null);
+
+    if (undoTimerRef.current) {
+      clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = null;
+    }
+  };
 
   // Shows the undo banner for a given report ID and starts the countdown.
   // Cancels any previously active timer first.
@@ -59,7 +69,7 @@ export function useUndoState(
 
     // Reject undo if the window already expired
     if (Date.now() > undoState.expiresAt) {
-      setUndoState(null);
+      clearUndoBanner();
       return;
     }
 
@@ -81,11 +91,7 @@ export function useUndoState(
       }
 
       // Hide banner and clear timer
-      setUndoState(null);
-      if (undoTimerRef.current) {
-        clearTimeout(undoTimerRef.current);
-        undoTimerRef.current = null;
-      }
+      clearUndoBanner();
     } catch (err: unknown) {
       setUndoState((prev) => (prev ? { ...prev, isProcessing: false } : prev));
 
@@ -104,5 +110,5 @@ export function useUndoState(
     };
   }, []);
 
-  return { undoState, showUndoBanner, undoAutoTaken };
+  return { undoState, showUndoBanner, undoAutoTaken, clearUndoBanner };
 }

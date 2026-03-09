@@ -10,6 +10,7 @@ import * as Notifications from 'expo-notifications';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import {
   deleteParkingReport,
+  getParkingReportById,
   markReportTaken,
   reopenParkingReport,
   type ParkingReport,
@@ -180,7 +181,7 @@ export default function MapScreen() {
   const [autoTakenBanner, setAutoTakenBanner] = useState<string | null>(null);
 
   // Undo banner state + undo handler.
-  const { undoState, showUndoBanner, undoAutoTaken } = useUndoState(
+  const { undoState, showUndoBanner, undoAutoTaken, clearUndoBanner } = useUndoState(
     myTakenReportId,
     setMyTakenReportId,
     manualTakenReportId,
@@ -314,6 +315,74 @@ export default function MapScreen() {
       const message = (err as { message?: string })?.message ?? 'Could not reopen this report.';
       Alert.alert('Failed', message);
     }
+  };
+
+  const clearTakenLockState = (reportId: string | null = null) => {
+    setMyTakenReportId(null);
+    setHasManuallyTakenASpot(false);
+    setManualTakenReportId(null);
+    clearUndoBanner();
+
+    setTakenByMeIds((prev) => {
+      if (!reportId) return new Set<string>();
+
+      const next = new Set(prev);
+      next.delete(reportId);
+      return next;
+    });
+  };
+
+  const confirmUnstuck = () => {
+    if (!uid) {
+      Alert.alert('Not signed in', 'Please sign in to clear taken status.');
+      return;
+    }
+
+    if (isAutoTaking || isCreatingSpot || isValidatingPlacement) return;
+
+    const lockedId = myTakenReportId;
+    const hasLock = Boolean(lockedId || hasManuallyTakenASpot);
+    if (!hasLock) {
+      Alert.alert('Nothing to clear', 'You do not have a taken-spot lock right now.');
+      return;
+    }
+
+    Alert.alert(
+      'Clear taken status?',
+      'Use this if your taken status got stuck. If your taken report still exists, we will try to reopen it first.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear Status',
+          style: 'destructive',
+          onPress: async () => {
+            setIsAutoTaking(true);
+            try {
+              let reopened = false;
+
+              if (lockedId) {
+                const report = await getParkingReportById(lockedId);
+                if (report && report.status === 'resolved' && report.resolvedBy === uid) {
+                  await reopenParkingReport(lockedId);
+                  reopened = true;
+                }
+              }
+
+              clearTakenLockState(lockedId);
+              setAutoTakenBanner(
+                reopened ? 'Taken status cleared and report reopened.' : 'Taken status cleared.',
+              );
+            } catch (err: unknown) {
+              console.warn('Unstuck reopen failed; clearing local lock only:', err);
+              clearTakenLockState(lockedId);
+              setAutoTakenBanner('Taken status cleared locally.');
+            } finally {
+              setIsAutoTaking(false);
+            }
+          },
+        },
+      ],
+    );
   };
 
   // Allows the user to manually mark a cloud report as taken.
@@ -821,6 +890,60 @@ export default function MapScreen() {
     setTakenByMeIds,
   ]);
 
+  // Keep taken lock healthy over time: clear if report is missing, no longer resolved by us,
+  // or expired (auto-untake on expiry to avoid softlocks).
+  useEffect(() => {
+    if (!uid || !myTakenReportId) return;
+
+    // Poll lightly while a taken lock exists.
+    if (tick % 5 !== 0) return;
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const inViewReport = cloudReports.find((x) => x.id === myTakenReportId);
+        const report = inViewReport ?? (await getParkingReportById(myTakenReportId));
+
+        if (cancelled) return;
+
+        if (!report) {
+          clearTakenLockState(myTakenReportId);
+          setAutoTakenBanner('Cleared stale taken status.');
+          return;
+        }
+
+        const stillMine = report.status === 'resolved' && report.resolvedBy === uid;
+        if (!stillMine) {
+          clearTakenLockState(report.id);
+          setAutoTakenBanner('Cleared stale taken status.');
+          return;
+        }
+
+        const durationSeconds = report.durationSeconds ?? 30;
+        const { expired } = getPinStatus(report.createdAt, durationSeconds);
+        if (!expired) return;
+
+        try {
+          await reopenParkingReport(report.id);
+        } catch (err: unknown) {
+          console.warn('Failed to reopen expired taken report (clearing local lock anyway):', err);
+        }
+
+        if (cancelled) return;
+
+        clearTakenLockState(report.id);
+        setAutoTakenBanner('Taken spot expired and was automatically cleared.');
+      } catch (err: unknown) {
+        console.warn('Failed to validate taken status:', err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [tick, uid, myTakenReportId, cloudReports]);
+
   // Persist local spots whenever they change.
   useEffect(() => {
     const persistSpots = async () => {
@@ -890,12 +1013,13 @@ export default function MapScreen() {
         isValidatingPlacement={isValidatingPlacement}
         undoState={undoState}
         autoTakenBanner={autoTakenBanner}
+        showUnstuckButton={Boolean(myTakenReportId || hasManuallyTakenASpot)}
         onUndo={undoAutoTaken}
         onShowHistory={() => setShowHistory(true)}
         onSignOut={handleSignOut}
         onRecenter={centerOnUser}
+        onUnstuck={confirmUnstuck}
       />
-
       {/* Marker details modal */}
       <MarkerInfoModal
         selectedMarker={selectedMarker}
