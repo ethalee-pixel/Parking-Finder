@@ -29,6 +29,7 @@ const UNDO_COOLDOWN_MS = 90_000;
 // Avoid re-prompting the same auto action repeatedly when the user taps "Not now".
 const ACTION_PROMPT_COOLDOWN_MS = 60_000;
 const AUTO_TAKE_NETWORK_TIMEOUT_MS = 8_000;
+const PROMPT_FAILSAFE_MS = 20_000;
 
 function distanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371000;
@@ -85,8 +86,13 @@ function confirmAutoAction(title: string, message: string, confirmLabel: string)
     const finish = (value: boolean) => {
       if (settled) return;
       settled = true;
+      clearTimeout(failsafe);
       resolve(value);
     };
+
+    // Defensive fallback: if Alert callbacks never fire (rare platform/UI edge-cases),
+    // resolve as "Not now" so prompt flow can recover and run again later.
+    const failsafe = setTimeout(() => finish(false), PROMPT_FAILSAFE_MS);
 
     Alert.alert(
       title,
@@ -322,13 +328,38 @@ export function useProximityAutoTake({
     alreadyAutoTakenRef.current.delete(reportId);
   };
 
-  const tryAutoTakeClosest = async () => {
-    if (!uid) return;
-    if (!canTakeAny) return;
-    if (promptInFlightRef.current) return;
+  const tryAutoTakeClosest = async (
+    opts?: { forcePrompt?: boolean; showWhyNot?: boolean },
+  ) => {
+    const forcePrompt = opts?.forcePrompt ?? false;
+    const showWhyNot = opts?.showWhyNot ?? false;
+
+    if (!uid) {
+      if (showWhyNot) Alert.alert('Not signed in', 'Please sign in to use nearby auto-take.');
+      return;
+    }
+
+    if (!canTakeAny) {
+      if (!showWhyNot) return;
+
+      if (myTakenReportId || hasManuallyTakenASpot) {
+        Alert.alert('Taken lock active', 'Clear your current taken status before checking nearby.');
+      } else if (isAutoTaking) {
+        Alert.alert('Working', 'Please wait for the current update to finish.');
+      }
+      return;
+    }
+
+    if (promptInFlightRef.current) {
+      if (showWhyNot) Alert.alert('Prompt already open', 'Respond to the current nearby prompt first.');
+      return;
+    }
 
     const userPos = userPosRef.current;
-    if (!userPos) return;
+    if (!userPos) {
+      if (showWhyNot) Alert.alert('Location unavailable', 'Waiting for your current location.');
+      return;
+    }
 
     const best = pickClosestOpenReport(cloudReports, userPos, radiusM, hiddenCloudIds);
 
@@ -338,7 +369,10 @@ export function useProximityAutoTake({
 
       if (alreadyAutoTakenRef.current.has(reportId)) return;
       if (isInCooldown(reportId)) return;
-      if (isPromptSuppressed(promptKey)) return;
+      if (!forcePrompt && isPromptSuppressed(promptKey)) {
+        if (showWhyNot) Alert.alert('Cooldown active', 'Try again in a few seconds.');
+        return;
+      }
 
       promptInFlightRef.current = true;
       try {
@@ -349,7 +383,7 @@ export function useProximityAutoTake({
         );
 
         if (!confirmed) {
-          suppressPrompt(promptKey);
+          if (!forcePrompt) suppressPrompt(promptKey);
           return;
         }
       } finally {
@@ -361,7 +395,10 @@ export function useProximityAutoTake({
     }
 
     const placePromptKey = toPlacePromptKey(userPos);
-    if (isPromptSuppressed(placePromptKey)) return;
+    if (!forcePrompt && isPromptSuppressed(placePromptKey)) {
+      if (showWhyNot) Alert.alert('Cooldown active', 'Try again in a few seconds.');
+      return;
+    }
 
     promptInFlightRef.current = true;
     try {
@@ -372,7 +409,7 @@ export function useProximityAutoTake({
       );
 
       if (!confirmed) {
-        suppressPrompt(placePromptKey);
+        if (!forcePrompt) suppressPrompt(placePromptKey);
         return;
       }
     } finally {

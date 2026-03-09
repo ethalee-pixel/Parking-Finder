@@ -192,13 +192,18 @@ export default function MapScreen() {
   // Firestore subscriptions for reports in visible area and "my reports".
   const { cloudReports, myReports } = useParkingReports(visibleRegion, uid);
 
-  const visibleCloudReports = cloudReports
+  // Cloud reports eligible for auto-take checks (in region + not hidden + not expired).
+  const autoTakeCloudReports = cloudReports
     .filter((report) => !hiddenCloudIds.has(report.id))
-    .filter((report) => !spots.some((spot) => spot.firestoreId === report.id))
     .filter((report) => {
       const { expired } = getPinStatus(report.createdAt, getDurationSeconds(report));
       return !expired;
     });
+
+  // Rendered cloud reports exclude cloud docs that already have a local marker copy.
+  const visibleCloudReports = autoTakeCloudReports.filter(
+    (report) => !spots.some((spot) => spot.firestoreId === report.id),
+  );
 
   // Retry local fallback spots and remove them once cloud sync succeeds.
   useLocalSpotSync({
@@ -210,9 +215,9 @@ export default function MapScreen() {
     },
   });
 
-  useProximityAutoTake({
+  const { tryAutoTakeClosest } = useProximityAutoTake({
     uid,
-    cloudReports: visibleCloudReports,
+    cloudReports: autoTakeCloudReports,
     userPosRef,
 
     isAutoTaking,
@@ -564,6 +569,17 @@ export default function MapScreen() {
     } catch (err: unknown) {
       console.error('centerOnUser failed:', err);
     }
+  };
+  const handleCheckNearby = async () => {
+    if (isCreatingSpot || isAutoTaking || isValidatingPlacement) return;
+
+    const userPos = await getCurrentUserPos();
+    if (!userPos) {
+      Alert.alert('Location unavailable', 'Could not read your location. Try again in a moment.');
+      return;
+    }
+
+    await tryAutoTakeClosest({ forcePrompt: true, showWhyNot: true });
   };
 
   // Renders a large red circle marker with a "T" to indicate a taken spot.
@@ -1005,7 +1021,6 @@ export default function MapScreen() {
         {/* Cloud (Firestore) reports, excluding hidden and duplicates of local */}
         {visibleCloudReports.map((report) => renderMarker(report, true))}
       </MapView>
-
       {/* Overlays: busy indicator, undo banner, legend, history, sign-out, and recenter */}
       <MapOverlays
         isCreatingSpot={isCreatingSpot}
@@ -1018,8 +1033,10 @@ export default function MapScreen() {
         onShowHistory={() => setShowHistory(true)}
         onSignOut={handleSignOut}
         onRecenter={centerOnUser}
+        onCheckNearby={handleCheckNearby}
         onUnstuck={confirmUnstuck}
       />
+
       {/* Marker details modal */}
       <MarkerInfoModal
         selectedMarker={selectedMarker}

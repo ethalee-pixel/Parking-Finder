@@ -25,6 +25,7 @@ type Props = {
   onShowHistory: () => void;
   onSignOut: () => void;
   onRecenter: () => void;
+  onCheckNearby: () => void;
   onUnstuck: () => void;
 };
 
@@ -39,6 +40,7 @@ export function MapOverlays({
   onShowHistory,
   onSignOut,
   onRecenter,
+  onCheckNearby,
   onUnstuck,
 }: Props) {
   const undoSecondsLeft = useMemo(() => {
@@ -89,6 +91,10 @@ export function MapOverlays({
 
       <TouchableOpacity style={[styles.actionBtn, styles.signOutBtn]} onPress={onSignOut}>
         <Text style={styles.actionBtnText}>Sign Out</Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity style={[styles.actionBtn, styles.checkNearbyBtn]} onPress={onCheckNearby}>
+        <Text style={styles.actionBtnText}>Check Nearby</Text>
       </TouchableOpacity>
 
       {showUnstuckButton && (
@@ -205,8 +211,11 @@ const styles = StyleSheet.create({
   signOutBtn: {
     top: 100,
   },
-  unstuckBtn: {
+  checkNearbyBtn: {
     top: 150,
+  },
+  unstuckBtn: {
+    top: 200,
   },
   actionBtnText: {
     fontWeight: 'bold',
