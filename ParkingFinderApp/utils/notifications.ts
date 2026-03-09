@@ -12,7 +12,6 @@ type SpotType = 'free' | 'paid';
 // Runs once when this module is imported.
 Notifications.setNotificationHandler({
   handleNotification: async (): Promise<Notifications.NotificationBehavior> => ({
-    shouldShowAlert: true,
     shouldPlaySound: true,
     shouldSetBadge: false,
     shouldShowBanner: true, // iOS
@@ -64,7 +63,7 @@ export async function scheduleSpotNotification(
   try {
     const notificationId = await Notifications.scheduleNotificationAsync({
       content: {
-        title: '⚠️ Parking Spot Expiring Soon',
+        title: 'Parking Spot Expiring Soon',
         body: `Your ${
           spotType === 'free' ? 'Free' : 'Paid'
         } parking spot will expire in ${formatDuration(secondsRemaining)}!`,
@@ -83,7 +82,8 @@ export async function scheduleSpotNotification(
     });
 
     return notificationId;
-  } catch {
+  } catch (err: unknown) {
+    console.warn('Failed to schedule spot notification:', err);
     return null;
   }
 }

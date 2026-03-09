@@ -1,12 +1,14 @@
 // MapOverlays.tsx
-// UI elements that appear on top of the map: busy indicator, undo banner,
-// status legend, history/sign-out buttons, recenter button, and the auto-taken banner.
+// UI elements that appear on top of the map: centered loading overlay, status legend,
+// history/sign-out buttons, recenter button, and a single shared bottom banner
+// for notifications + undo.
 
 import React, { useMemo } from 'react';
-import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 type UndoState = {
   reportId: string;
+  message: string;
   expiresAt: number;
   isProcessing: boolean;
 };
@@ -14,9 +16,10 @@ type UndoState = {
 type Props = {
   isCreatingSpot: boolean;
   isAutoTaking: boolean;
+  isValidatingPlacement: boolean;
   undoState: UndoState | null;
 
-  // Banner text shown after auto-taking, e.g. "Marked as TAKEN (you arrived and parked)."
+  // Banner text for non-undo notifications.
   autoTakenBanner: string | null;
 
   onUndo: () => void;
@@ -28,6 +31,7 @@ type Props = {
 export function MapOverlays({
   isCreatingSpot,
   isAutoTaking,
+  isValidatingPlacement,
   undoState,
   autoTakenBanner,
   onUndo,
@@ -41,68 +45,84 @@ export function MapOverlays({
     return Math.max(0, Math.ceil((undoState.expiresAt - Date.now()) / 1000));
   }, [undoState]);
 
+  const bottomBannerMessage = undoState
+    ? `${undoState.message} Undo? (${undoSecondsLeft}s)`
+    : autoTakenBanner;
+
+  const isBusy = isCreatingSpot || isAutoTaking || isValidatingPlacement;
+
+  const loadingText = isCreatingSpot
+    ? 'Saving spot...'
+    : isValidatingPlacement
+      ? 'Checking location...'
+      : 'Updating...';
+
   return (
     <>
-      {(isCreatingSpot || isAutoTaking) && (
-        <View style={styles.busyPill}>
-          <ActivityIndicator size="small" color="#000" />
-          <Text style={styles.busyPillText}>
-            {isCreatingSpot ? 'Saving spot...' : 'Updating...'}
-          </Text>
-        </View>
+      {isBusy && (
+        <Modal transparent animationType="fade" statusBarTranslucent>
+          <View style={styles.loadingBackdrop}>
+            <View style={styles.loadingCard}>
+              <ActivityIndicator size="large" color="#111111" />
+              <Text style={styles.loadingText}>{loadingText}</Text>
+            </View>
+          </View>
+        </Modal>
       )}
 
-      {undoState && (
-        <View style={styles.undoBanner}>
-          <Text style={styles.undoText}>Marked as taken. Undo? ({undoSecondsLeft}s)</Text>
+      {!isBusy && (
+        <>
+          {/* Simple color legend for marker status */}
+          <View style={styles.colorGuide}>
+            <Text style={styles.guideTitle}>Status</Text>
 
-          <TouchableOpacity
-            style={[styles.undoBtn, undoState.isProcessing && styles.disabled]}
-            onPress={onUndo}
-            disabled={undoState.isProcessing}
-          >
-            <Text style={styles.undoBtnText}>{undoState.isProcessing ? 'Undoing...' : 'UNDO'}</Text>
+            <View style={styles.colorRow}>
+              <View style={[styles.colorDot, styles.dotActive]} />
+              <Text style={styles.guideText}>Active</Text>
+            </View>
+
+            <View style={styles.colorRow}>
+              <View style={[styles.colorDot, styles.dotExpiring]} />
+              <Text style={styles.guideText}>Expiring Soon</Text>
+            </View>
+          </View>
+
+          {/* Primary actions on the map */}
+          <TouchableOpacity style={styles.actionBtn} onPress={onShowHistory}>
+            <Text style={styles.actionBtnText}>My History</Text>
           </TouchableOpacity>
-        </View>
+
+          <TouchableOpacity style={[styles.actionBtn, styles.signOutBtn]} onPress={onSignOut}>
+            <Text style={styles.actionBtnText}>Sign Out</Text>
+          </TouchableOpacity>
+
+          {/* Recenter button (bottom-right) */}
+          <TouchableOpacity
+            style={styles.recenterBtn}
+            onPress={onRecenter}
+            accessibilityLabel="Recenter map"
+          >
+            <Text style={styles.recenterText}>O</Text>
+          </TouchableOpacity>
+        </>
       )}
 
-      {/* Simple color legend for marker status */}
-      <View style={styles.colorGuide}>
-        <Text style={styles.guideTitle}>Status</Text>
+      {/* Single shared bottom banner: notification-only OR undo-capable */}
+      {!isBusy && bottomBannerMessage && (
+        <View style={styles.bottomBanner}>
+          <Text style={styles.bottomBannerText}>{bottomBannerMessage}</Text>
 
-        <View style={styles.colorRow}>
-          <View style={[styles.colorDot, styles.dotActive]} />
-          <Text style={styles.guideText}>Active</Text>
-        </View>
-
-        <View style={styles.colorRow}>
-          <View style={[styles.colorDot, styles.dotExpiring]} />
-          <Text style={styles.guideText}>Expiring Soon</Text>
-        </View>
-      </View>
-
-      {/* Primary actions on the map */}
-      <TouchableOpacity style={styles.actionBtn} onPress={onShowHistory}>
-        <Text style={styles.actionBtnText}>My History</Text>
-      </TouchableOpacity>
-
-      <TouchableOpacity style={[styles.actionBtn, styles.signOutBtn]} onPress={onSignOut}>
-        <Text style={styles.actionBtnText}>Sign Out</Text>
-      </TouchableOpacity>
-
-      {/* Recenter button (bottom-right) */}
-      <TouchableOpacity
-        style={styles.recenterBtn}
-        onPress={onRecenter}
-        accessibilityLabel="Recenter map"
-      >
-        <Text style={styles.recenterText}>◎</Text>
-      </TouchableOpacity>
-
-      {/* Brief informational banner after auto-taking */}
-      {autoTakenBanner && (
-        <View style={styles.banner}>
-          <Text style={styles.bannerText}>{autoTakenBanner}</Text>
+          {undoState && (
+            <TouchableOpacity
+              style={[styles.undoBtn, undoState.isProcessing && styles.disabled]}
+              onPress={onUndo}
+              disabled={undoState.isProcessing}
+            >
+              <Text style={styles.undoBtnText}>
+                {undoState.isProcessing ? 'Undoing...' : 'UNDO'}
+              </Text>
+            </TouchableOpacity>
+          )}
         </View>
       )}
     </>
@@ -110,21 +130,32 @@ export function MapOverlays({
 }
 
 const styles = StyleSheet.create({
-  busyPill: {
-    position: 'absolute',
-    top: 12,
-    left: 12,
-    flexDirection: 'row',
+  loadingBackdrop: {
+    flex: 1,
+    justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.95)',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 999,
-    elevation: 6,
+    backgroundColor: 'rgba(0,0,0,0.32)',
   },
-  busyPillText: {
-    marginLeft: 8,
-    fontWeight: '600',
+  loadingCard: {
+    minWidth: 240,
+    paddingVertical: 22,
+    paddingHorizontal: 24,
+    borderRadius: 16,
+    backgroundColor: 'white',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.08)',
+    elevation: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 12,
+  },
+  loadingText: {
+    marginTop: 12,
+    fontWeight: '700',
+    fontSize: 16,
+    color: '#111111',
   },
 
   colorGuide: {
@@ -156,10 +187,10 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   dotActive: {
-    backgroundColor: '#00FF00',
+    backgroundColor: '#00ff00',
   },
   dotExpiring: {
-    backgroundColor: '#FF0000',
+    backgroundColor: '#ff0000',
   },
 
   actionBtn: {
@@ -197,26 +228,11 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
 
-  banner: {
-    position: 'absolute',
-    top: 140,
-    left: 20,
-    right: 20,
-    padding: 12,
-    borderRadius: 12,
-    backgroundColor: 'white',
-    elevation: 6,
-  },
-  bannerText: {
-    textAlign: 'center',
-    fontWeight: '600',
-  },
-
-  undoBanner: {
+  bottomBanner: {
     position: 'absolute',
     left: 16,
     right: 16,
-    bottom: 24,
+    bottom: 96,
     backgroundColor: 'rgba(0,0,0,0.85)',
     borderRadius: 12,
     paddingVertical: 12,
@@ -225,7 +241,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  undoText: {
+  bottomBannerText: {
     color: 'white',
     flex: 1,
     marginRight: 12,

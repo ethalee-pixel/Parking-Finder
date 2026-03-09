@@ -8,6 +8,8 @@ import {
   deleteDoc,
   doc,
   endAt,
+  getDoc,
+  setDoc,
   onSnapshot,
   orderBy,
   query,
@@ -35,6 +37,7 @@ export type ParkingReportCreate = {
   type: 'free' | 'paid';
   rate?: string;
   durationSeconds?: number;
+  clientSpotId?: string;
 };
 
 export type ParkingReport = {
@@ -56,6 +59,7 @@ export type ParkingReport = {
 
   resolvedAt?: unknown;
   resolvedBy?: string;
+  clientSpotId?: string;
 };
 
 // Normalizes and validates latitude/longitude values from UI inputs and Firestore docs.
@@ -75,7 +79,29 @@ function sanitizeCoord(lat: unknown, lon: unknown): Coord | null {
   return { latitude: latNum, longitude: lonNum };
 }
 
-// Subscribes to "open" reports that intersect a bounding box using geohash range queries.
+function toParkingReport(id: string, data: any): ParkingReport | null {
+  const coord = sanitizeCoord(data.latitude, data.longitude);
+  if (!coord) return null;
+
+  return {
+    id,
+    userId: data.userId,
+    createdBy: data.createdBy,
+    latitude: coord.latitude,
+    longitude: coord.longitude,
+    geohash: data.geohash,
+    type: data.type,
+    rate: data.rate ?? null,
+    status: data.status ?? 'open',
+    createdAt: data.createdAt,
+    durationSeconds: data.durationSeconds ?? 30,
+    clientSpotId: data.clientSpotId,
+    resolvedAt: data.resolvedAt,
+    resolvedBy: data.resolvedBy,
+  };
+}
+
+// Subscribes to reports that intersect a bounding box using geohash range queries.
 // Does a final strict bounding-box check since geohash ranges are approximate.
 export function subscribeToParkingReportsInBounds(
   bounds: Bounds,
@@ -97,12 +123,17 @@ export function subscribeToParkingReportsInBounds(
   const unsubs: Array<() => void> = [];
   const docMap = new Map<string, ParkingReport>();
 
+  // Track which reports are currently present in each geohash query range.
+  const rangeToIds = new Map<number, Set<string>>();
+  const reportToRanges = new Map<string, Set<number>>();
+
   const emit = () => onData(Array.from(docMap.values()));
 
-  for (const [start, end] of geobounds) {
+  for (let rangeIndex = 0; rangeIndex < geobounds.length; rangeIndex += 1) {
+    const [start, end] = geobounds[rangeIndex];
+
     const q = query(
       collection(FIRESTORE_DB, 'parkingReports'),
-      where('status', '==', 'open'),
       orderBy('geohash'),
       startAt(start),
       endAt(end),
@@ -111,42 +142,49 @@ export function subscribeToParkingReportsInBounds(
     const unsub = onSnapshot(
       q,
       (snap) => {
+        const prevIds = rangeToIds.get(rangeIndex) ?? new Set<string>();
+        const nextIds = new Set<string>();
+
         for (const d of snap.docs) {
           const data = d.data() as any;
 
-          // Final strict bounding-box check
-          const lat = data.latitude;
-          const lng = data.longitude;
-
-          if (
-            typeof lat !== 'number' ||
-            typeof lng !== 'number' ||
-            lat < bounds.minLat ||
-            lat > bounds.maxLat ||
-            lng < bounds.minLng ||
-            lng > bounds.maxLng
-          ) {
-            docMap.delete(d.id);
+          const report = toParkingReport(d.id, data);
+          if (!report) {
+            console.warn('Dropping bad parkingReport doc:', d.id, data);
             continue;
           }
 
-          docMap.set(d.id, {
-            id: d.id,
-            userId: data.userId,
-            createdBy: data.createdBy,
-            latitude: lat,
-            longitude: lng,
-            geohash: data.geohash,
-            type: data.type,
-            rate: data.rate ?? null,
-            status: data.status ?? 'open',
-            createdAt: data.createdAt,
-            durationSeconds: data.durationSeconds ?? 30,
-            resolvedAt: data.resolvedAt,
-            resolvedBy: data.resolvedBy,
-          });
+          const inBounds =
+            report.latitude >= bounds.minLat &&
+            report.latitude <= bounds.maxLat &&
+            report.longitude >= bounds.minLng &&
+            report.longitude <= bounds.maxLng;
+
+          if (!inBounds) continue;
+
+          docMap.set(d.id, report);
+          nextIds.add(d.id);
+
+          const ranges = reportToRanges.get(d.id) ?? new Set<number>();
+          ranges.add(rangeIndex);
+          reportToRanges.set(d.id, ranges);
         }
 
+        // Remove any docs that this specific query no longer returns.
+        for (const oldId of prevIds) {
+          if (nextIds.has(oldId)) continue;
+
+          const ranges = reportToRanges.get(oldId);
+          if (!ranges) continue;
+
+          ranges.delete(rangeIndex);
+          if (ranges.size === 0) {
+            reportToRanges.delete(oldId);
+            docMap.delete(oldId);
+          }
+        }
+
+        rangeToIds.set(rangeIndex, nextIds);
         emit();
       },
       (err) => onError?.(err),
@@ -155,21 +193,23 @@ export function subscribeToParkingReportsInBounds(
     unsubs.push(unsub);
   }
 
-  return () => unsubs.forEach((u) => u());
+  return () => {
+    for (const unsub of unsubs) unsub();
+    rangeToIds.clear();
+    reportToRanges.clear();
+    docMap.clear();
+  };
 }
 
 export async function createParkingReport(data: ParkingReportCreate): Promise<string> {
   const user = FIREBASE_AUTH.currentUser;
   if (!user) throw new Error('Not logged in (FIREBASE_AUTH.currentUser is null)');
-
   const coord = sanitizeCoord(data.latitude, data.longitude);
   if (!coord) {
     throw new Error(`Invalid coordinates: ${data.latitude}, ${data.longitude}`);
   }
-
   const geohash = geohashForLocation([coord.latitude, coord.longitude]);
-
-  const docRef = await addDoc(collection(FIRESTORE_DB, 'parkingReports'), {
+  const payload = {
     userId: user.uid,
     createdBy: user.uid,
     latitude: coord.latitude,
@@ -180,8 +220,20 @@ export async function createParkingReport(data: ParkingReportCreate): Promise<st
     status: 'open',
     createdAt: serverTimestamp(),
     durationSeconds: data.durationSeconds ?? 30,
-  });
-
+    clientSpotId: data.clientSpotId ?? null,
+  };
+  // Deterministic document IDs make offline retry idempotent.
+  if (data.clientSpotId) {
+    const safeClientSpotId = encodeURIComponent(data.clientSpotId);
+    const idempotentDocId = `client-${user.uid}-${safeClientSpotId}`;
+    const reportRef = doc(FIRESTORE_DB, 'parkingReports', idempotentDocId);
+    const existing = await getDoc(reportRef);
+    if (!existing.exists()) {
+      await setDoc(reportRef, payload);
+    }
+    return reportRef.id;
+  }
+  const docRef = await addDoc(collection(FIRESTORE_DB, 'parkingReports'), payload);
   return docRef.id;
 }
 
@@ -195,22 +247,44 @@ export async function deleteParkingReport(reportId: string): Promise<void> {
   console.log('Deleted parking report from Firestore:', reportId);
 }
 
-export async function markReportTaken(reportId: string) {
+export async function markReportTaken(reportId: string): Promise<void> {
   const user = FIREBASE_AUTH.currentUser;
-  if (!user) throw new Error("Not logged in");
+  if (!user) throw new Error('Not logged in');
 
-  await updateDoc(doc(FIRESTORE_DB, "parkingReports", reportId), {
-    status: "resolved",
+  await updateDoc(doc(FIRESTORE_DB, 'parkingReports', reportId), {
+    status: 'resolved',
     resolvedBy: user.uid,
     resolvedAt: serverTimestamp(),
   });
 
-  console.log("Marked parking report as resolved (taken):", reportId);
+  console.log('Marked parking report as resolved (taken):', reportId);
 }
 
-// Subscribes to parking reports (ordered by createdAt desc).
-// NOTE: `bounds` is currently unused by this subscription.
-// Keep it for future improvements or remove it if you want to simplify the API.
+export async function reopenParkingReport(reportId: string): Promise<void> {
+  const user = FIREBASE_AUTH.currentUser;
+  if (!user) throw new Error('Not logged in');
+
+  await updateDoc(doc(FIRESTORE_DB, 'parkingReports', reportId), {
+    status: 'open',
+    resolvedAt: null,
+    resolvedBy: null,
+  });
+}
+
+export async function getParkingReportById(reportId: string): Promise<ParkingReport | null> {
+  const snap = await getDoc(doc(FIRESTORE_DB, 'parkingReports', reportId));
+  if (!snap.exists()) return null;
+
+  const report = toParkingReport(snap.id, snap.data());
+  if (!report) {
+    console.warn('Dropping bad parkingReport doc:', snap.id, snap.data());
+    return null;
+  }
+
+  return report;
+}
+
+// Legacy subscription used by older flows. Kept for compatibility.
 export function subscribeToParkingReports(
   bounds: Bounds,
   onData: (reports: ParkingReport[]) => void,
@@ -227,28 +301,14 @@ export function subscribeToParkingReports(
 
       for (const d of snap.docs) {
         const data = d.data() as any;
+        const report = toParkingReport(d.id, data);
 
-        const coord = sanitizeCoord(data.latitude, data.longitude);
-        if (!coord) {
+        if (!report) {
           console.warn('Dropping bad parkingReport doc:', d.id, data);
           continue;
         }
 
-        reports.push({
-          id: d.id,
-          userId: data.userId,
-          createdBy: data.createdBy,
-          latitude: coord.latitude,
-          longitude: coord.longitude,
-          geohash: data.geohash,
-          type: data.type,
-          rate: data.rate ?? null,
-          status: data.status ?? 'open',
-          createdAt: data.createdAt,
-          durationSeconds: data.durationSeconds ?? 30,
-          resolvedAt: data.resolvedAt,
-          resolvedBy: data.resolvedBy,
-        });
+        reports.push(report);
       }
 
       onData(reports);
@@ -282,25 +342,10 @@ export function subscribeToMyParkingReports(
 
       for (const d of snap.docs) {
         const data = d.data() as any;
+        const report = toParkingReport(d.id, data);
+        if (!report) continue;
 
-        const coord = sanitizeCoord(data.latitude, data.longitude);
-        if (!coord) continue;
-
-        reports.push({
-          id: d.id,
-          userId: data.userId,
-          createdBy: data.createdBy,
-          latitude: coord.latitude,
-          longitude: coord.longitude,
-          geohash: data.geohash,
-          type: data.type,
-          rate: data.rate ?? null,
-          status: data.status ?? 'open',
-          createdAt: data.createdAt,
-          durationSeconds: data.durationSeconds ?? 30,
-          resolvedAt: data.resolvedAt,
-          resolvedBy: data.resolvedBy,
-        });
+        reports.push(report);
       }
 
       onData(reports);

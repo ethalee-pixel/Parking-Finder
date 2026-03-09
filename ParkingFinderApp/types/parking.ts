@@ -39,27 +39,8 @@ export type ParkingSpot = {
   firestoreId?: string;
 };
 
-/**
- * LastReported
- * Minimal data needed to detect when the user arrives near
- * a spot they just created (auto-taken behavior).
- */
-export type LastReported = {
-  firestoreId: string; // Firestore document to resolve on arrival
-  latitude: number;
-  longitude: number;
-  createdAt: number; // Unix timestamp (ms)
-};
-
-/* ────────────────────────────────────────── */
-/* AsyncStorage Keys */
-/* ────────────────────────────────────────── */
-
 // Persist local spots across app restarts
 export const STORAGE_KEY = '@parking_spots';
-
-// Tracks the most recently reported spot (arrival detection)
-export const LAST_REPORTED_KEY = '@last_reported_spot';
 
 // Tracks which Firestore report the user currently has marked as taken
 export const MY_TAKEN_KEY = '@my_taken_report_id';

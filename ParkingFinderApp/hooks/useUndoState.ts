@@ -1,24 +1,24 @@
-// useUndoState - manages the undo banner shown after a spot is marked taken.
+﻿// useUndoState - manages the undo banner shown after a spot is marked taken.
 // Gives the user a 45-second window to reverse the action.
 
 import { useEffect, useRef, useState } from 'react';
 import { Alert } from 'react-native';
-import { doc, updateDoc } from 'firebase/firestore';
 
-import { FIRESTORE_DB } from '../FirebaseConfig';
+import { reopenParkingReport } from '../services/parkingReports';
 
 // How long (ms) the user has to undo a mark-taken action
 const UNDO_WINDOW_MS = 45_000;
 
 type UndoState = {
   reportId: string;
+  message: string;
   expiresAt: number; // Timestamp when the undo window expires
   isProcessing: boolean; // True while the undo Firestore write is in flight
 } | null;
 
 type UseUndoStateResult = {
   undoState: UndoState;
-  showUndoBanner: (reportId: string) => void;
+  showUndoBanner: (reportId: string, message?: string) => void;
   undoAutoTaken: () => Promise<void>;
 };
 
@@ -37,14 +37,14 @@ export function useUndoState(
 
   // Shows the undo banner for a given report ID and starts the countdown.
   // Cancels any previously active timer first.
-  const showUndoBanner = (reportId: string) => {
+  const showUndoBanner = (reportId: string, message = 'Marked as taken.') => {
     if (undoTimerRef.current) {
       clearTimeout(undoTimerRef.current);
       undoTimerRef.current = null;
     }
 
     const expiresAt = Date.now() + UNDO_WINDOW_MS;
-    setUndoState({ reportId, expiresAt, isProcessing: false });
+    setUndoState({ reportId, message, expiresAt, isProcessing: false });
 
     undoTimerRef.current = setTimeout(() => {
       setUndoState(null);
@@ -69,11 +69,7 @@ export function useUndoState(
     setUndoState({ ...undoState, isProcessing: true });
 
     try {
-      await updateDoc(doc(FIRESTORE_DB, 'parkingReports', undoState.reportId), {
-        status: 'open',
-        resolvedAt: null,
-        resolvedBy: null,
-      });
+      await reopenParkingReport(undoState.reportId);
 
       // Clear "my taken report" tracking if we just undid it
       if (myTakenReportId === undoState.reportId) setMyTakenReportId(null);

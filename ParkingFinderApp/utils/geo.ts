@@ -86,8 +86,7 @@ const overpassCache = new Map<string, { ok: boolean; t: number }>();
  * Used to prevent placing spots in invalid locations (fields/buildings/etc).
  *
  * Returns true if a road/parking element exists nearby.
- * On network failure, caches ok=true (so the user isn't blocked) and re-throws
- * so the caller can optionally show a warning.
+ * Returns false if validation cannot be completed (network/rate-limit/etc).
  */
 export async function isNearRoadOrParkingOSM(
   latitude: number,
@@ -128,8 +127,8 @@ out body;
 
     return ok;
   } catch (err) {
-    // Don't block the user due to flaky networks or rate limiting.
-    overpassCache.set(key, { ok: true, t: Date.now() });
-    throw err;
+    console.warn('Overpass validation failed:', err);
+    overpassCache.set(key, { ok: false, t: Date.now() });
+    return false;
   }
 }

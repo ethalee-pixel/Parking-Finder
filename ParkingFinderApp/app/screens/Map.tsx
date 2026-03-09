@@ -8,26 +8,19 @@ import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { doc, updateDoc } from 'firebase/firestore';
-
 import {
   deleteParkingReport,
   markReportTaken,
+  reopenParkingReport,
   type ParkingReport,
 } from '../../services/parkingReports';
-import { FIREBASE_AUTH, FIRESTORE_DB } from '../../FirebaseConfig';
-import {
-  LAST_REPORTED_KEY,
-  MY_TAKEN_KEY,
-  STORAGE_KEY,
-  type LastReported,
-  type ParkingSpot,
-} from '../../types/parking';
-import { isNearMe, isNearRoadOrParkingOSM, safeCoord } from '../../utils/geo';
+import { FIREBASE_AUTH } from '../../FirebaseConfig';
+import { MY_TAKEN_KEY, STORAGE_KEY, type ParkingSpot } from '../../types/parking';
+import { distanceMeters, isNearMe, isNearRoadOrParkingOSM, safeCoord } from '../../utils/geo';
 import { formatDuration, getAgeInSeconds, getPinStatus } from '../../utils/time';
 import { requestNotificationPermissions } from '../../utils/notifications';
 
-import { useLocationTracking } from '../../hooks/useLocationTracking';
+import { useLocalSpotSync } from '../../hooks/useLocalSpotSync';
 import { useParkingReports } from '../../hooks/useParkingReports';
 import { useUndoState } from '../../hooks/useUndoState';
 
@@ -36,7 +29,7 @@ import { MapOverlays } from '../../components/MapOverlays';
 import { MarkerInfoModal } from '../../components/MarkerInfoModal';
 import { NewSpotModal } from '../../components/NewSpotModal';
 
-import { useProximityAutoTake } from "../../hooks/useProximityAutoTake";
+import { useProximityAutoTake } from '../../hooks/useProximityAutoTake';
 
 // How close (in meters) the user must be to manually mark a spot as taken.
 const NEARBY_TAKEN_RADIUS_M = 75;
@@ -50,13 +43,22 @@ const DEFAULT_REGION: Region = {
 };
 
 const USER_CENTER_DELTA: Pick<Region, 'latitudeDelta' | 'longitudeDelta'> = {
-  latitudeDelta: 0.005,
-  longitudeDelta: 0.005,
+  latitudeDelta: 0.0015,
+  longitudeDelta: 0.0015,
 };
+
+const MAX_PIN_PLACE_DISTANCE_M = 200;
+
+const PIN_SIZE = 35;
+const PIN_FONT_SIZE = 14;
+const TAKEN_PIN_FONT_SIZE = 18;
 
 const REGION_DEBOUNCE_MS = 400;
 const TICK_INTERVAL_MS = 1000;
 const AUTO_TAKEN_BANNER_MS = 4000;
+
+const LOCATION_WATCH_TIME_INTERVAL_MS = 3000;
+const LOCATION_WATCH_DISTANCE_INTERVAL_M = 3;
 
 // Used to type marker modal selection.
 type MarkerData = ParkingSpot | ParkingReport;
@@ -92,6 +94,9 @@ export default function MapScreen() {
 
   // Latest known GPS position for proximity checks (manual-taken).
   const userPosRef = useRef<{ lat: number; lon: number } | null>(null);
+
+  // Foreground location watcher used to keep userPosRef fresh while moving.
+  const locationWatchRef = useRef<Location.LocationSubscription | null>(null);
 
   // Prevents a user from manually marking more than one spot as taken per session.
   const [hasManuallyTakenASpot, setHasManuallyTakenASpot] = useState(false);
@@ -134,6 +139,9 @@ export default function MapScreen() {
   // Prevents double-tapping save while a spot is being created.
   const [isCreatingSpot, setIsCreatingSpot] = useState(false);
 
+  // True while long-press placement is being validated against location/OSM.
+  const [isValidatingPlacement, setIsValidatingPlacement] = useState(false);
+
   // Prevents concurrent auto-taken or manual-taken operations.
   const [isAutoTaking, setIsAutoTaking] = useState(false);
 
@@ -149,13 +157,9 @@ export default function MapScreen() {
   // Selected marker data for MarkerInfoModal.
   const [selectedMarker, setSelectedMarker] = useState<SelectedMarker | null>(null);
 
-  // Last spot this user reported (used for auto-taken proximity detection).
-  const [lastReported, setLastReported] = useState<LastReported | null>(null);
-
   // Temporary banner shown after auto-taking a spot.
   const [autoTakenBanner, setAutoTakenBanner] = useState<string | null>(null);
 
-  
   // Undo banner state + undo handler.
   const { undoState, showUndoBanner, undoAutoTaken } = useUndoState(
     myTakenReportId,
@@ -168,23 +172,27 @@ export default function MapScreen() {
   // Firestore subscriptions for reports in visible area and "my reports".
   const { cloudReports, myReports } = useParkingReports(visibleRegion, uid);
 
-  // GPS tracking + auto-taken behavior.
-  useLocationTracking({
-    lastReported,
+  const visibleCloudReports = cloudReports
+    .filter((report) => !hiddenCloudIds.has(report.id))
+    .filter((report) => !spots.some((spot) => spot.firestoreId === report.id))
+    .filter((report) => {
+      const { expired } = getPinStatus(report.createdAt, getDurationSeconds(report));
+      return !expired;
+    });
+
+  // Retry local fallback spots and remove them once cloud sync succeeds.
+  useLocalSpotSync({
     uid,
-    isAutoTaking,
-    setIsAutoTaking,
-    setMyTakenReportId,
-    setTakenByMeIds,
-    setLastReported,
-    setAutoTakenBanner,
-    showUndoBanner,
-    userPosRef,
+    spots,
+    setSpots,
+    onSpotSynced: () => {
+      setAutoTakenBanner('Queued local spot synced to cloud.');
+    },
   });
 
-    useProximityAutoTake({
+  useProximityAutoTake({
     uid,
-    cloudReports,
+    cloudReports: visibleCloudReports,
     userPosRef,
 
     isAutoTaking,
@@ -222,7 +230,7 @@ export default function MapScreen() {
           const spotLabel = spot.type === 'free' ? 'Free' : 'Paid';
 
           Alert.alert(
-            '⚠️ Parking Spot Expiring Soon',
+            'Parking Spot Expiring Soon',
             `Your ${spotLabel} parking spot will expire in ${formatDuration(
               timeRemainingSeconds,
             )}!`,
@@ -263,11 +271,7 @@ export default function MapScreen() {
     }
 
     try {
-      await updateDoc(doc(FIRESTORE_DB, 'parkingReports', reportId), {
-        status: 'open',
-        resolvedAt: null,
-        resolvedBy: null,
-      });
+      await reopenParkingReport(reportId);
 
       // Clear taken tracking if this was our taken report.
       if (myTakenReportId === reportId) {
@@ -301,8 +305,8 @@ export default function MapScreen() {
       return;
     }
     if (myTakenReportId) {
-  Alert.alert("Limit reached", "You already have a taken spot. Reopen/undo it first.");
-  return;
+      Alert.alert('Limit reached', 'You already have a taken spot. Reopen/undo it first.');
+      return;
     }
     if (hasManuallyTakenASpot) {
       Alert.alert('Limit reached', 'You already marked one spot as taken.');
@@ -338,7 +342,7 @@ export default function MapScreen() {
       setManualTakenReportId(reportId);
 
       // Show undo banner so the user can reverse within the undo window.
-      showUndoBanner(reportId);
+      showUndoBanner(reportId, 'Marked spot as taken.');
 
       Alert.alert('Marked taken', 'This spot was marked as taken.');
     } catch (err: unknown) {
@@ -350,68 +354,68 @@ export default function MapScreen() {
   };
 
   // Shows a confirmation dialog before removing a local spot and its cloud copy (if any).
-// Shows a confirmation dialog before removing a local spot and its cloud copy (if any).
-const confirmRemoveSpot = (id: string) => {
-  const spot = spots.find((s) => s.id === id);
+  // Shows a confirmation dialog before removing a local spot and its cloud copy (if any).
+  const confirmRemoveSpot = (id: string) => {
+    const spot = spots.find((s) => s.id === id);
 
-  Alert.alert("Remove Spot?", "Permanently remove this marker?", [
-    { text: "Cancel", style: "cancel" },
-    {
-      text: "Remove",
-      style: "destructive",
-      onPress: async () => {
-        // Remove locally right away
-        setSpots((prev) => prev.filter((s) => s.id !== id));
+    Alert.alert('Remove Spot?', 'Permanently remove this marker?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Remove',
+        style: 'destructive',
+        onPress: async () => {
+          // Remove locally right away
+          setSpots((prev) => prev.filter((s) => s.id !== id));
 
-        const cloudId = spot?.firestoreId;
+          const cloudId = spot?.firestoreId;
 
-        // ✅ If this spot was your "taken" one, immediately unlock taking another
-        if (cloudId) {
-          if (myTakenReportId === cloudId) {
-            setMyTakenReportId(null);
+          // If this spot was your "taken" one, immediately unlock taking another
+          if (cloudId) {
+            if (myTakenReportId === cloudId) {
+              setMyTakenReportId(null);
+            }
+
+            if (manualTakenReportId === cloudId) {
+              setHasManuallyTakenASpot(false);
+              setManualTakenReportId(null);
+            }
+
+            setTakenByMeIds((prev) => {
+              const next = new Set(prev);
+              next.delete(cloudId);
+              return next;
+            });
           }
 
-          if (manualTakenReportId === cloudId) {
-            setHasManuallyTakenASpot(false);
-            setManualTakenReportId(null);
-          }
+          // If there is no cloud doc, we're done
+          if (!cloudId) return;
 
-          setTakenByMeIds((prev) => {
-            const next = new Set(prev);
-            next.delete(cloudId);
-            return next;
-          });
-        }
-
-        // If there is no cloud doc, we're done
-        if (!cloudId) return;
-
-        // Hide immediately to prevent flicker while Firestore updates.
-        setHiddenCloudIds((prev) => {
-          const next = new Set(prev);
-          next.add(cloudId);
-          return next;
-        });
-
-        try {
-          await deleteParkingReport(cloudId);
-        } catch (err: unknown) {
-          // If deletion fails, unhide and notify.
+          // Hide immediately to prevent flicker while Firestore updates.
           setHiddenCloudIds((prev) => {
             const next = new Set(prev);
-            next.delete(cloudId);
+            next.add(cloudId);
             return next;
           });
 
-          const message =
-            (err as { message?: string })?.message ??
-            "Could not delete this spot from the cloud.";
-          Alert.alert("Delete failed", message);
-        }
+          try {
+            await deleteParkingReport(cloudId);
+          } catch (err: unknown) {
+            // If deletion fails, unhide and notify.
+            setHiddenCloudIds((prev) => {
+              const next = new Set(prev);
+              next.delete(cloudId);
+              return next;
+            });
+
+            const message =
+              (err as { message?: string })?.message ??
+              'Could not delete this spot from the cloud.';
+            Alert.alert('Delete failed', message);
+          }
+        },
       },
-    },
-  ]);
-};
+    ]);
+  };
 
   // Signs the current user out of Firebase Auth.
   const handleSignOut = async () => {
@@ -424,6 +428,28 @@ const confirmRemoveSpot = (id: string) => {
     }
   };
 
+  // Reads the latest user position from the shared ref, falling back to a fresh GPS read.
+  const getCurrentUserPos = async () => {
+    if (userPosRef.current) return userPosRef.current;
+
+    try {
+      const loc = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Highest,
+      });
+
+      const pos = {
+        lat: loc.coords.latitude,
+        lon: loc.coords.longitude,
+      };
+
+      userPosRef.current = pos;
+      return pos;
+    } catch (err: unknown) {
+      console.warn('Could not get current user position:', err);
+      return null;
+    }
+  };
+
   // Gets the user's current GPS location and animates the map to center on them.
   const centerOnUser = async () => {
     try {
@@ -433,6 +459,11 @@ const confirmRemoveSpot = (id: string) => {
       const loc = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.Highest,
       });
+
+      userPosRef.current = {
+        lat: loc.coords.latitude,
+        lon: loc.coords.longitude,
+      };
 
       const userRegion: Region = {
         latitude: loc.coords.latitude,
@@ -458,9 +489,16 @@ const confirmRemoveSpot = (id: string) => {
     if (!coord) return null;
 
     return (
-      <Marker key={`taken-${keyId}`} coordinate={coord} onPress={onPress}>
+      <Marker
+        key={`taken-${keyId}-view-v1`}
+        coordinate={coord}
+        onPress={onPress}
+        anchor={{ x: 0.5, y: 0.5 }}
+      >
         <View style={styles.takenPin}>
-          <Text style={styles.takenPinText}>T</Text>
+          <Text allowFontScaling={false} style={styles.takenPinText}>
+            T
+          </Text>
         </View>
       </Marker>
     );
@@ -472,62 +510,74 @@ const confirmRemoveSpot = (id: string) => {
     const coord = safeCoord(data.latitude, data.longitude);
     if (!coord) return null;
 
-if (isCloud && isCloudReport(data) && data.status === "resolved") {
-  // ✅ show only your current active taken report
-  const takenByMe = data.id === myTakenReportId;
-  if (!takenByMe) return null;
+    if (isCloud && isCloudReport(data) && data.status === 'resolved') {
+      const takenByMe = data.id === myTakenReportId;
+      if (!takenByMe) return null;
 
-  return renderTakenTMarker(data.id, coord.latitude, coord.longitude, () => {
-    setSelectedMarker({ data, isCloud: true });
-  });
-}
+      return renderTakenTMarker(data.id, coord.latitude, coord.longitude, () => {
+        setSelectedMarker({ data, isCloud: true });
+      });
+    }
 
     const durationSeconds = getDurationSeconds(data);
     const { color, expired } = getPinStatus(data.createdAt, durationSeconds);
 
-    // Do not render expired markers.
     if (expired) return null;
 
     return (
       <Marker
-        key={`${isCloud ? 'cloud' : 'local'}-${data.id}`}
+        key={`${isCloud ? 'cloud' : 'local'}-${data.id}-view-v1`}
         coordinate={coord}
         onPress={() => setSelectedMarker({ data, isCloud })}
+        anchor={{ x: 0.5, y: 0.5 }}
       >
         <View style={[styles.customPin, { backgroundColor: color }]}>
-          <Text style={styles.pinText}>{data.type === 'free' ? 'F' : '$'}</Text>
+          <Text allowFontScaling={false} style={styles.pinText}>
+            {data.type === 'free' ? 'F' : '$'}
+          </Text>
         </View>
       </Marker>
     );
   };
 
-  // Handles long-press on the map: validate the location is near a road or parking area,
+  // Handles long-press on the map: enforce distance to user, validate near road/parking,
   // then open the NewSpotModal.
   const handleMapLongPress = async (event: MapLongPressEvent) => {
-    if (isCreatingSpot) return;
+    if (isCreatingSpot || isValidatingPlacement) return;
 
-    const { latitude, longitude } = event.nativeEvent.coordinate;
-
+    setIsValidatingPlacement(true);
     try {
-      const ok = await isNearRoadOrParkingOSM(latitude, longitude);
-      if (!ok) {
+      const { latitude, longitude } = event.nativeEvent.coordinate;
+
+      const userPos = await getCurrentUserPos();
+      if (!userPos) {
+        Alert.alert('Location unavailable', 'Could not read your location. Try again in a moment.');
+        return;
+      }
+
+      const tapDistanceM = distanceMeters(userPos.lat, userPos.lon, latitude, longitude);
+      if (tapDistanceM > MAX_PIN_PLACE_DISTANCE_M) {
         Alert.alert(
-          'Not on a road/parking area',
-          'Try placing the spot closer to a road or a parking lot/structure.',
+          'Pin too far away',
+          `Pins can only be placed within ${MAX_PIN_PLACE_DISTANCE_M}m of you.\n\nSelected point: ${Math.round(tapDistanceM)}m away.`,
         );
         return;
       }
-    } catch (err: unknown) {
-      // If OSM check fails (network/rate-limit), allow the spot but warn the user.
-      console.warn('OSM verification failed:', err);
-      Alert.alert(
-        'Could not verify location',
-        'Location check failed (network/rate-limit). Spot was allowed anyway.',
-      );
-    }
 
-    setPendingCoord({ latitude, longitude });
-    setShowModal(true);
+      const isRoadOrParking = await isNearRoadOrParkingOSM(latitude, longitude);
+      if (!isRoadOrParking) {
+        Alert.alert(
+          'Invalid placement',
+          'Could not verify this point as a road/parking area. Move closer to a road or lot and try again.',
+        );
+        return;
+      }
+
+      setPendingCoord({ latitude, longitude });
+      setShowModal(true);
+    } finally {
+      setIsValidatingPlacement(false);
+    }
   };
 
   // Debounces the visible region update to avoid excessive Firestore queries.
@@ -537,6 +587,45 @@ if (isCloud && isCloudReport(data) && data.status === "resolved") {
   };
 
   // Effects
+
+  // Keep userPosRef updated continuously so auto-take can react while moving.
+  useEffect(() => {
+    let mounted = true;
+
+    const startWatchingLocation = async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') return;
+
+        locationWatchRef.current?.remove();
+        locationWatchRef.current = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.Balanced,
+            timeInterval: LOCATION_WATCH_TIME_INTERVAL_MS,
+            distanceInterval: LOCATION_WATCH_DISTANCE_INTERVAL_M,
+          },
+          (loc) => {
+            if (!mounted) return;
+
+            userPosRef.current = {
+              lat: loc.coords.latitude,
+              lon: loc.coords.longitude,
+            };
+          },
+        );
+      } catch (err: unknown) {
+        console.warn('Failed to start location watcher:', err);
+      }
+    };
+
+    void startWatchingLocation();
+
+    return () => {
+      mounted = false;
+      locationWatchRef.current?.remove();
+      locationWatchRef.current = null;
+    };
+  }, []);
 
   // Game loop: increments tick every second to drive expiration checks.
   useEffect(() => {
@@ -627,16 +716,6 @@ if (isCloud && isCloudReport(data) && data.status === "resolved") {
           }
         }
 
-        // Restore last reported spot for auto-taken tracking.
-        const savedLast = await AsyncStorage.getItem(LAST_REPORTED_KEY);
-        if (savedLast) {
-          try {
-            setLastReported(JSON.parse(savedLast) as LastReported);
-          } catch (err: unknown) {
-            console.warn('Failed to parse LAST_REPORTED_KEY:', err);
-          }
-        }
-
         if (status !== 'granted') {
           setRegion(DEFAULT_REGION);
           setVisibleRegion(DEFAULT_REGION);
@@ -648,10 +727,15 @@ if (isCloud && isCloudReport(data) && data.status === "resolved") {
             accuracy: Location.Accuracy.Highest,
           });
 
+          userPosRef.current = {
+            lat: loc.coords.latitude,
+            lon: loc.coords.longitude,
+          };
+
           const userRegion: Region = {
-            ...DEFAULT_REGION,
             latitude: loc.coords.latitude,
             longitude: loc.coords.longitude,
+            ...USER_CENTER_DELTA,
           };
 
           setRegion(userRegion);
@@ -679,54 +763,40 @@ if (isCloud && isCloudReport(data) && data.status === "resolved") {
     void initializeApp();
   }, []);
 
-  // Verify our taken report is still resolved by us. If not, clear the local tracking.
-useEffect(() => {
-  if (!uid || !myTakenReportId) return;
+  // Verify our taken report is still resolved by us when that report is in the current viewport.
+  useEffect(() => {
+    if (!uid || !myTakenReportId) return;
 
-  const report = cloudReports.find((x) => x.id === myTakenReportId);
+    const report = cloudReports.find((x) => x.id === myTakenReportId);
 
-  // ✅ If the report is missing (deleted or out of bounds), unlock the user
-  if (!report) {
-    setMyTakenReportId(null);
+    // The report may be outside the current visible region; do not unlock based on that.
+    if (!report) return;
 
-    setTakenByMeIds((prev) => {
-      const next = new Set(prev);
-      next.delete(myTakenReportId);
-      return next;
-    });
+    const stillMine = report.status === 'resolved' && report.resolvedBy === uid;
 
-    if (manualTakenReportId === myTakenReportId) {
-      setHasManuallyTakenASpot(false);
-      setManualTakenReportId(null);
+    if (!stillMine) {
+      setMyTakenReportId(null);
+
+      setTakenByMeIds((prev) => {
+        const next = new Set(prev);
+        next.delete(myTakenReportId);
+        return next;
+      });
+
+      if (manualTakenReportId === myTakenReportId) {
+        setHasManuallyTakenASpot(false);
+        setManualTakenReportId(null);
+      }
     }
-    return;
-  }
-
-  const stillMine = report.status === "resolved" && report.resolvedBy === uid;
-
-  if (!stillMine) {
-    setMyTakenReportId(null);
-
-    setTakenByMeIds((prev) => {
-      const next = new Set(prev);
-      next.delete(myTakenReportId);
-      return next;
-    });
-
-    if (manualTakenReportId === myTakenReportId) {
-      setHasManuallyTakenASpot(false);
-      setManualTakenReportId(null);
-    }
-  }
-}, [
-  cloudReports,
-  uid,
-  myTakenReportId,
-  manualTakenReportId,
-  setHasManuallyTakenASpot,
-  setManualTakenReportId,
-  setTakenByMeIds,
-]);
+  }, [
+    cloudReports,
+    uid,
+    myTakenReportId,
+    manualTakenReportId,
+    setHasManuallyTakenASpot,
+    setManualTakenReportId,
+    setTakenByMeIds,
+  ]);
 
   // Persist local spots whenever they change.
   useEffect(() => {
@@ -787,16 +857,14 @@ useEffect(() => {
         {spots.map((spot) => renderMarker(spot, false))}
 
         {/* Cloud (Firestore) reports, excluding hidden and duplicates of local */}
-        {cloudReports
-          .filter((r) => !hiddenCloudIds.has(r.id))
-          .filter((r) => !spots.some((s) => s.firestoreId === r.id))
-          .map((r) => renderMarker(r, true))}
+        {visibleCloudReports.map((report) => renderMarker(report, true))}
       </MapView>
 
       {/* Overlays: busy indicator, undo banner, legend, history, sign-out, and recenter */}
       <MapOverlays
         isCreatingSpot={isCreatingSpot}
         isAutoTaking={isAutoTaking}
+        isValidatingPlacement={isValidatingPlacement}
         undoState={undoState}
         autoTakenBanner={autoTakenBanner}
         onUndo={undoAutoTaken}
@@ -845,14 +913,7 @@ useEffect(() => {
         setShowModal={setShowModal}
         setPendingCoord={setPendingCoord}
         setSpots={setSpots}
-        setMyTakenReportId={setMyTakenReportId}
-        setTakenByMeIds={setTakenByMeIds}
-        setHasManuallyTakenASpot={setHasManuallyTakenASpot}
-        setManualTakenReportId={setManualTakenReportId}
-        setLastReported={setLastReported}
         setAutoTakenBanner={setAutoTakenBanner}
-        showUndoBanner={showUndoBanner}
-        myTakenReportId={myTakenReportId}
       />
     </View>
   );
@@ -862,44 +923,44 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   map: { flex: 1 },
 
-  // Circular pin marker shown on the map for active spots.
   customPin: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: PIN_SIZE,
+    height: PIN_SIZE,
+    borderRadius: PIN_SIZE / 2,
     borderWidth: 2,
     borderColor: 'white',
     justifyContent: 'center',
     alignItems: 'center',
-    elevation: 5,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 3,
   },
 
-  pinText: { color: 'white', fontWeight: 'bold' },
+  pinText: {
+    color: 'white',
+    fontWeight: 'bold',
+    fontSize: PIN_FONT_SIZE,
+    lineHeight: PIN_FONT_SIZE + 1,
+    textAlign: 'center',
+    includeFontPadding: false,
+    textAlignVertical: 'center',
+  },
 
-  // Marker used to show a taken spot (big red "T").
   takenPin: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: PIN_SIZE,
+    height: PIN_SIZE,
+    borderRadius: PIN_SIZE / 2,
     backgroundColor: 'red',
     borderWidth: 2,
     borderColor: 'white',
     justifyContent: 'center',
     alignItems: 'center',
-    elevation: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 3,
   },
 
   takenPinText: {
     color: 'white',
     fontWeight: '900',
-    fontSize: 20,
+    fontSize: TAKEN_PIN_FONT_SIZE,
+    lineHeight: TAKEN_PIN_FONT_SIZE + 1,
+    textAlign: 'center',
+    includeFontPadding: false,
+    textAlignVertical: 'center',
   },
 });

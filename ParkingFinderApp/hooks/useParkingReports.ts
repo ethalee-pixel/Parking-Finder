@@ -1,5 +1,5 @@
 // useParkingReports - subscribes to two Firestore real-time streams:
-// 1) cloudReports: open parking reports within the visible map bounds
+// 1) cloudReports: reports within the visible map bounds
 // 2) myReports: reports created by the current user (for history)
 
 import { useEffect, useState } from 'react';
@@ -7,7 +7,7 @@ import type { Region } from 'react-native-maps';
 
 import {
   subscribeToMyParkingReports,
-  subscribeToParkingReports,
+  subscribeToParkingReportsInBounds,
   type ParkingReport,
 } from '../services/parkingReports';
 import { regionToBounds } from '../utils/geo';
@@ -31,7 +31,7 @@ export function useParkingReports(
   useEffect(() => {
     const bounds = regionToBounds(visibleRegion);
 
-    const unsubscribe = subscribeToParkingReports(
+    const unsubscribe = subscribeToParkingReportsInBounds(
       bounds,
       (reports) => setCloudReports(reports),
       (err) => console.log('Firestore error:', err),

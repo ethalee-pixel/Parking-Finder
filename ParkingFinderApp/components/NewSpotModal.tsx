@@ -1,13 +1,14 @@
 // NewSpotModal.tsx
 // Modal form for creating a new parking spot.
 // Triggered by long-press on the map. User selects free/paid, optional rate,
-// and a duration (hours/minutes/seconds). On save:
-// - schedules a local expiry warning notification
-// - attempts to create a Firestore report
-// - immediately marks the report as taken by the creator (red T)
-// If the cloud write fails, it falls back to saving locally.
+// and a duration (hours/minutes/seconds).
+//
+// Save behavior:
+// - attempts to create a cloud report as OPEN
+// - uses a deterministic clientSpotId for idempotent retries
+// - if cloud write fails, saves locally so the sync hook can retry later
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Keyboard,
@@ -21,9 +22,8 @@ import {
   View,
 } from 'react-native';
 
-import { createParkingReport, markReportTaken } from '../services/parkingReports';
-import { ParkingSpot } from '../types/parking';
-import { isNearRoadOrParkingOSM } from '../utils/geo';
+import { createParkingReport } from '../services/parkingReports';
+import { type ParkingSpot } from '../types/parking';
 import { scheduleSpotNotification } from '../utils/notifications';
 import { formatDuration } from '../utils/time';
 
@@ -37,28 +37,17 @@ type Props = {
   uid: string | null;
 
   // True while a Firestore write is in flight (disables actions).
-  myTakenReportId: string | null;
   isCreatingSpot: boolean;
 
   setIsCreatingSpot: (v: boolean) => void;
   setShowModal: (v: boolean) => void;
   setPendingCoord: (v: { latitude: number; longitude: number } | null) => void;
 
-  // Local spot list update (used for fallback).
+  // Local fallback list update (used when cloud write fails).
   setSpots: (fn: (prev: ParkingSpot[]) => ParkingSpot[]) => void;
 
-  // Taken/undo tracking state in Map.tsx.
-  setMyTakenReportId: (id: string | null) => void;
-  setTakenByMeIds: (fn: (prev: Set<string>) => Set<string>) => void;
-  setHasManuallyTakenASpot: (v: boolean) => void;
-  setManualTakenReportId: (id: string | null) => void;
-
-  // Auto-taken tracking + banner.
-  setLastReported: (v: any) => void;
+  // Shared bottom-banner message.
   setAutoTakenBanner: (v: string | null) => void;
-
-  // Shows the undo banner for a given report ID.
-  showUndoBanner: (id: string) => void;
 };
 
 type SpotType = 'free' | 'paid';
@@ -67,23 +56,18 @@ function clampInt(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, Math.floor(value)));
 }
 
+const PICKER_ITEM_HEIGHT = 40;
+
 export function NewSpotModal({
   showModal,
   pendingCoord,
   uid,
-  myTakenReportId,
   isCreatingSpot,
   setIsCreatingSpot,
   setShowModal,
   setPendingCoord,
   setSpots,
-  setMyTakenReportId,
-  setTakenByMeIds,
-  setHasManuallyTakenASpot,
-  setManualTakenReportId,
-  setLastReported,
   setAutoTakenBanner,
-  showUndoBanner,
 }: Props) {
   // Free vs paid selector.
   const [spotType, setSpotType] = useState<SpotType>('free');
@@ -115,8 +99,8 @@ export function NewSpotModal({
     setSpotType('free');
   };
 
-  // Creates the report in Firestore and immediately marks it as taken by the creator.
-  // Falls back to saving locally if the cloud write fails.
+  // Creates an OPEN report in Firestore.
+  // Falls back to local storage if cloud write fails.
   const saveSpot = async () => {
     if (!pendingCoord) return;
 
@@ -133,7 +117,7 @@ export function NewSpotModal({
       return;
     }
 
-    // Generate a local ID up front (used for notification + fallback).
+    // Generate a local ID up front (used for idempotent cloud write + fallback).
     const timestamp = Date.now();
     const localId = `spot-${timestamp}-${Math.random()}`;
 
@@ -158,69 +142,28 @@ export function NewSpotModal({
     await scheduleSpotNotification(localId, totalSeconds, spotType);
 
     try {
-      // Optional safety check: verify near road/parking using OSM.
-      // If this fails due to network/rate-limit, we allow the spot and continue.
-      try {
-        const ok = await isNearRoadOrParkingOSM(newSpot.latitude, newSpot.longitude);
-        if (!ok) {
-          Alert.alert(
-            'Not on a road/parking area',
-            'Try placing the spot closer to a road or a parking lot/structure.',
-          );
-        }
-      } catch {
-        Alert.alert(
-          'Could not verify location',
-          'OSM check failed (network/rate-limit). Spot was allowed anyway.',
-        );
-      }
-// Create a firestoreId
-const firestoreId = await createParkingReport({
-  latitude: newSpot.latitude,
-  longitude: newSpot.longitude,
-  type: newSpot.type,
-  rate: newSpot.rate,
-  durationSeconds: totalSeconds,
-});
-
-// 🚨 Prevent multiple taken pins
-if (myTakenReportId) {
-  setAutoTakenBanner("Placed spot (left OPEN because you already have a taken spot).");
-  return; // leaves it open
-}
-
-await markReportTaken(firestoreId); // ✅ only once
-
-// Mark it as taken immediately so it shows as a red T for the creator.
-await markReportTaken(firestoreId);
-
-      // Record taken state for rendering + undo logic.
-      setMyTakenReportId(firestoreId);
-      setTakenByMeIds((prev) => {
-        const next = new Set(prev);
-        next.add(firestoreId);
-        return next;
+      await createParkingReport({
+        latitude: newSpot.latitude,
+        longitude: newSpot.longitude,
+        type: newSpot.type,
+        rate: newSpot.rate,
+        durationSeconds: totalSeconds,
+        clientSpotId: localId,
       });
 
-      // Creating a spot counts as your one manual-taken this session.
-      setHasManuallyTakenASpot(true);
-      setManualTakenReportId(firestoreId);
-
-      // Show undo banner in case the user made a mistake.
-      showUndoBanner(firestoreId);
-
-      // Let the UI know what happened.
-      setAutoTakenBanner('Placed spot and marked as TAKEN.');
-
-      // No need for auto-taken tracking when we immediately resolve it.
-      setLastReported(null);
-
-      // Attach Firestore ID to local spot object (useful if you later store it locally).
-      newSpot.firestoreId = firestoreId;
+      setAutoTakenBanner('Spot reported and shared.');
     } catch (e: any) {
       // Cloud save failed, keep the spot locally so the user doesn't lose it.
-      Alert.alert('Firestore save failed', e?.message ?? 'Unknown error.');
       setSpots((prev) => [...prev, newSpot]);
+
+      Alert.alert(
+        'Saved locally',
+        'Spot was saved on this device and will sync automatically when online.',
+      );
+
+      setAutoTakenBanner('Saved locally. Will auto-sync when online.');
+
+      console.warn('Cloud save failed. Spot queued for retry:', e?.message ?? e);
     } finally {
       setIsCreatingSpot(false);
     }
@@ -302,7 +245,7 @@ await markReportTaken(firestoreId);
             onPress={saveSpot}
             disabled={isCreatingSpot}
           >
-            <Text style={styles.saveText}>{isCreatingSpot ? 'Saving…' : 'Save'}</Text>
+            <Text style={styles.saveText}>{isCreatingSpot ? 'Saving...' : 'Save'}</Text>
           </TouchableOpacity>
 
           <TouchableOpacity onPress={closeModal} disabled={isCreatingSpot}>
@@ -326,11 +269,21 @@ type PickerColumnProps = {
 // Small helper component: a scrollable number picker column.
 function PickerColumn({ label, value, max, disabled, onSelect, keyPrefix }: PickerColumnProps) {
   const items = useMemo(() => Array.from({ length: max + 1 }, (_, i) => i), [max]);
+  const scrollRef = useRef<ScrollView | null>(null);
+
+  useEffect(() => {
+    // Keep the selected value in view so defaults like "30s" are obvious.
+    const offsetY = value * PICKER_ITEM_HEIGHT;
+
+    requestAnimationFrame(() => {
+      scrollRef.current?.scrollTo({ y: offsetY, animated: false });
+    });
+  }, [value]);
 
   return (
     <View style={styles.pickerColumn}>
       <Text style={styles.pickerColumnLabel}>{label}</Text>
-      <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
+      <ScrollView ref={scrollRef} style={styles.picker} showsVerticalScrollIndicator={false}>
         {items.map((n) => {
           const selected = n === value;
           return (
@@ -434,7 +387,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#f9f9f9',
   },
   pickerItem: {
-    padding: 8,
+    height: PICKER_ITEM_HEIGHT,
+    paddingHorizontal: 8,
+    justifyContent: 'center',
     alignItems: 'center',
     borderBottomWidth: 1,
     borderBottomColor: '#eee',
@@ -445,6 +400,9 @@ const styles = StyleSheet.create({
   pickerItemText: {
     fontSize: 16,
     color: '#333',
+    textAlign: 'center',
+    includeFontPadding: false,
+    textAlignVertical: 'center',
   },
   pickerItemTextSelected: {
     color: 'white',
