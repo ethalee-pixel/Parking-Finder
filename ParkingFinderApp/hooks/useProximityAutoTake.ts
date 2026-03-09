@@ -80,10 +80,14 @@ function toPlacePromptKey(userPos: UserPos): string {
   return `place:${userPos.lat.toFixed(4)}:${userPos.lon.toFixed(4)}`;
 }
 
-function confirmAutoAction(title: string, message: string, confirmLabel: string): Promise<boolean> {
+function confirmAutoAction(
+  title: string,
+  message: string,
+  confirmLabel: string,
+): Promise<'confirm' | 'decline' | 'timeout'> {
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (value: boolean) => {
+    const finish = (value: 'confirm' | 'decline' | 'timeout') => {
       if (settled) return;
       settled = true;
       clearTimeout(failsafe);
@@ -91,19 +95,19 @@ function confirmAutoAction(title: string, message: string, confirmLabel: string)
     };
 
     // Defensive fallback: if Alert callbacks never fire (rare platform/UI edge-cases),
-    // resolve as "Not now" so prompt flow can recover and run again later.
-    const failsafe = setTimeout(() => finish(false), PROMPT_FAILSAFE_MS);
+    // return "timeout" so callers can retry without applying the full decline cooldown.
+    const failsafe = setTimeout(() => finish('timeout'), PROMPT_FAILSAFE_MS);
 
     Alert.alert(
       title,
       message,
       [
-        { text: 'Not now', style: 'cancel', onPress: () => finish(false) },
-        { text: confirmLabel, onPress: () => finish(true) },
+        { text: 'Not now', style: 'cancel', onPress: () => finish('decline') },
+        { text: confirmLabel, onPress: () => finish('confirm') },
       ],
       {
         cancelable: true,
-        onDismiss: () => finish(false),
+        onDismiss: () => finish('decline'),
       },
     );
   });
@@ -376,14 +380,17 @@ export function useProximityAutoTake({
 
       promptInFlightRef.current = true;
       try {
-        const confirmed = await confirmAutoAction(
+        const decision = await confirmAutoAction(
           'Nearby parking spot found',
           `You are about ${Math.round(best.distM)}m from an open pin. Mark it as taken?`,
           'Mark Taken',
         );
 
-        if (!confirmed) {
-          if (!forcePrompt) suppressPrompt(promptKey);
+        if (decision !== 'confirm') {
+          if (decision === 'decline' && !forcePrompt) suppressPrompt(promptKey);
+          if (decision === 'timeout' && showWhyNot) {
+            Alert.alert('Prompt unavailable', 'Could not display confirmation. Please try again.');
+          }
           return;
         }
       } finally {
@@ -402,14 +409,17 @@ export function useProximityAutoTake({
 
     promptInFlightRef.current = true;
     try {
-      const confirmed = await confirmAutoAction(
+      const decision = await confirmAutoAction(
         'No nearby open spot',
         'No open pin is very close. Place a new pin at your location and mark it as taken?',
         'Place + Take',
       );
 
-      if (!confirmed) {
-        if (!forcePrompt) suppressPrompt(placePromptKey);
+      if (decision !== 'confirm') {
+        if (decision === 'decline' && !forcePrompt) suppressPrompt(placePromptKey);
+        if (decision === 'timeout' && showWhyNot) {
+          Alert.alert('Prompt unavailable', 'Could not display confirmation. Please try again.');
+        }
         return;
       }
     } finally {
@@ -422,6 +432,8 @@ export function useProximityAutoTake({
   // Poll for proximity auto actions every few seconds.
   useEffect(() => {
     if (!uid) return;
+
+    void tryAutoTakeClosest();
 
     const interval = setInterval(() => {
       void tryAutoTakeClosest();
