@@ -59,6 +59,7 @@ const AUTO_TAKEN_BANNER_MS = 4000;
 
 const LOCATION_WATCH_TIME_INTERVAL_MS = 3000;
 const LOCATION_WATCH_DISTANCE_INTERVAL_M = 3;
+const PLACEMENT_VALIDATE_TIMEOUT_MS = 7_000;
 
 // Used to type marker modal selection.
 type MarkerData = ParkingSpot | ParkingReport;
@@ -83,6 +84,24 @@ function isCloudReport(data: MarkerData): data is ParkingReport {
 
 function getDurationSeconds(data: MarkerData): number {
   return data.durationSeconds ?? 30;
+}
+
+async function withTimeoutFallback<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  fallbackValue: T,
+): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+  const timeoutPromise = new Promise<T>((resolve) => {
+    timeoutHandle = setTimeout(() => resolve(fallbackValue), timeoutMs);
+  });
+
+  try {
+    return (await Promise.race([promise, timeoutPromise])) as T;
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
 }
 
 export default function MapScreen() {
@@ -564,7 +583,11 @@ export default function MapScreen() {
         return;
       }
 
-      const isRoadOrParking = await isNearRoadOrParkingOSM(latitude, longitude);
+      const isRoadOrParking = await withTimeoutFallback(
+        isNearRoadOrParkingOSM(latitude, longitude),
+        PLACEMENT_VALIDATE_TIMEOUT_MS,
+        false,
+      );
       if (!isRoadOrParking) {
         Alert.alert(
           'Invalid placement',

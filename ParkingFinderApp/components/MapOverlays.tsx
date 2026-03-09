@@ -1,10 +1,9 @@
 // MapOverlays.tsx
-// UI elements that appear on top of the map: centered loading overlay, status legend,
-// history/sign-out buttons, recenter button, and a single shared bottom banner
-// for notifications + undo.
+// UI elements that appear on top of the map: non-blocking centered loading indicator,
+// status legend, history/sign-out buttons, recenter button, and a shared bottom banner.
 
 import React, { useMemo } from 'react';
-import { ActivityIndicator, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 type UndoState = {
   reportId: string;
@@ -19,7 +18,6 @@ type Props = {
   isValidatingPlacement: boolean;
   undoState: UndoState | null;
 
-  // Banner text for non-undo notifications.
   autoTakenBanner: string | null;
 
   onUndo: () => void;
@@ -39,7 +37,6 @@ export function MapOverlays({
   onSignOut,
   onRecenter,
 }: Props) {
-  // Remaining seconds for the undo banner countdown.
   const undoSecondsLeft = useMemo(() => {
     if (!undoState) return 0;
     return Math.max(0, Math.ceil((undoState.expiresAt - Date.now()) / 1000));
@@ -60,55 +57,45 @@ export function MapOverlays({
   return (
     <>
       {isBusy && (
-        <Modal transparent animationType="fade" statusBarTranslucent>
-          <View style={styles.loadingBackdrop}>
-            <View style={styles.loadingCard}>
-              <ActivityIndicator size="large" color="#111111" />
-              <Text style={styles.loadingText}>{loadingText}</Text>
-            </View>
+        <View pointerEvents="none" style={styles.loadingOverlay}>
+          <View style={styles.loadingCard}>
+            <ActivityIndicator size="large" color="#111111" />
+            <Text style={styles.loadingText}>{loadingText}</Text>
           </View>
-        </Modal>
+        </View>
       )}
 
-      {!isBusy && (
-        <>
-          {/* Simple color legend for marker status */}
-          <View style={styles.colorGuide}>
-            <Text style={styles.guideTitle}>Status</Text>
+      <View style={styles.colorGuide}>
+        <Text style={styles.guideTitle}>Status</Text>
 
-            <View style={styles.colorRow}>
-              <View style={[styles.colorDot, styles.dotActive]} />
-              <Text style={styles.guideText}>Active</Text>
-            </View>
+        <View style={styles.colorRow}>
+          <View style={[styles.colorDot, styles.dotActive]} />
+          <Text style={styles.guideText}>Active</Text>
+        </View>
 
-            <View style={styles.colorRow}>
-              <View style={[styles.colorDot, styles.dotExpiring]} />
-              <Text style={styles.guideText}>Expiring Soon</Text>
-            </View>
-          </View>
+        <View style={styles.colorRow}>
+          <View style={[styles.colorDot, styles.dotExpiring]} />
+          <Text style={styles.guideText}>Expiring Soon</Text>
+        </View>
+      </View>
 
-          {/* Primary actions on the map */}
-          <TouchableOpacity style={styles.actionBtn} onPress={onShowHistory}>
-            <Text style={styles.actionBtnText}>My History</Text>
-          </TouchableOpacity>
+      <TouchableOpacity style={styles.actionBtn} onPress={onShowHistory}>
+        <Text style={styles.actionBtnText}>My History</Text>
+      </TouchableOpacity>
 
-          <TouchableOpacity style={[styles.actionBtn, styles.signOutBtn]} onPress={onSignOut}>
-            <Text style={styles.actionBtnText}>Sign Out</Text>
-          </TouchableOpacity>
+      <TouchableOpacity style={[styles.actionBtn, styles.signOutBtn]} onPress={onSignOut}>
+        <Text style={styles.actionBtnText}>Sign Out</Text>
+      </TouchableOpacity>
 
-          {/* Recenter button (bottom-right) */}
-          <TouchableOpacity
-            style={styles.recenterBtn}
-            onPress={onRecenter}
-            accessibilityLabel="Recenter map"
-          >
-            <Text style={styles.recenterText}>O</Text>
-          </TouchableOpacity>
-        </>
-      )}
+      <TouchableOpacity
+        style={styles.recenterBtn}
+        onPress={onRecenter}
+        accessibilityLabel="Recenter map"
+      >
+        <Text style={styles.recenterText}>O</Text>
+      </TouchableOpacity>
 
-      {/* Single shared bottom banner: notification-only OR undo-capable */}
-      {!isBusy && bottomBannerMessage && (
+      {bottomBannerMessage && (
         <View style={styles.bottomBanner}>
           <Text style={styles.bottomBannerText}>{bottomBannerMessage}</Text>
 
@@ -130,11 +117,13 @@ export function MapOverlays({
 }
 
 const styles = StyleSheet.create({
-  loadingBackdrop: {
-    flex: 1,
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.32)',
+    backgroundColor: 'rgba(0,0,0,0.20)',
+    zIndex: 30,
+    elevation: 30,
   },
   loadingCard: {
     minWidth: 240,
@@ -210,7 +199,6 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
 
-  // Bottom-right recenter button (thumb-friendly)
   recenterBtn: {
     position: 'absolute',
     right: 20,

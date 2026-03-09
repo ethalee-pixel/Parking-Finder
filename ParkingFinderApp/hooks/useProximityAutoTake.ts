@@ -1,4 +1,4 @@
-﻿// useProximityAutoTake.ts
+// useProximityAutoTake.ts
 //
 // Nearby flow for "I'm parked":
 // 1) If an OPEN pin is very close, ask to mark that one as TAKEN.
@@ -28,6 +28,7 @@ const UNDO_COOLDOWN_MS = 90_000;
 
 // Avoid re-prompting the same auto action repeatedly when the user taps "Not now".
 const ACTION_PROMPT_COOLDOWN_MS = 60_000;
+const AUTO_TAKE_NETWORK_TIMEOUT_MS = 8_000;
 
 function distanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371000;
@@ -100,6 +101,24 @@ function confirmAutoAction(title: string, message: string, confirmLabel: string)
       },
     );
   });
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: string,
+): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+  });
+
+  try {
+    return (await Promise.race([promise, timeoutPromise])) as T;
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
 }
 
 type Params = {
@@ -242,7 +261,11 @@ export function useProximityAutoTake({
     alreadyAutoTakenRef.current.add(reportId);
 
     try {
-      await markReportTaken(reportId);
+      await withTimeout(
+        markReportTaken(reportId),
+        AUTO_TAKE_NETWORK_TIMEOUT_MS,
+        'Mark taken request timed out.',
+      );
 
       markTakenInState(reportId);
       showUndoBanner?.(reportId, undoMessage);
@@ -262,15 +285,23 @@ export function useProximityAutoTake({
     let reportId: string | null = null;
 
     try {
-      reportId = await createParkingReport({
-        latitude: userPos.lat,
-        longitude: userPos.lon,
-        type: 'free',
-        durationSeconds: DEFAULT_AUTO_PLACE_DURATION_SECONDS,
-      });
+      reportId = await withTimeout(
+        createParkingReport({
+          latitude: userPos.lat,
+          longitude: userPos.lon,
+          type: 'free',
+          durationSeconds: DEFAULT_AUTO_PLACE_DURATION_SECONDS,
+        }),
+        AUTO_TAKE_NETWORK_TIMEOUT_MS,
+        'Auto-place request timed out.',
+      );
 
       alreadyAutoTakenRef.current.add(reportId);
-      await markReportTaken(reportId);
+      await withTimeout(
+        markReportTaken(reportId),
+        AUTO_TAKE_NETWORK_TIMEOUT_MS,
+        'Mark taken request timed out.',
+      );
 
       markTakenInState(reportId);
       showUndoBanner?.(reportId, 'Placed a new pin and marked it as taken.');
