@@ -79,6 +79,7 @@ const OVERPASS_RADIUS_M = 25;
 
 // Cache results briefly to reduce duplicate network calls.
 const OVERPASS_CACHE_MS = 60_000;
+const OVERPASS_FETCH_TIMEOUT_MS = 6_000;
 const overpassCache = new Map<string, { ok: boolean; t: number }>();
 
 /**
@@ -110,11 +111,15 @@ export async function isNearRoadOrParkingOSM(
 out body;
 `;
 
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), OVERPASS_FETCH_TIMEOUT_MS);
+
   try {
     const res = await fetch(OVERPASS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: `data=${encodeURIComponent(query)}`,
+      signal: controller.signal,
     });
 
     if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
@@ -130,5 +135,7 @@ out body;
     console.warn('Overpass validation failed:', err);
     overpassCache.set(key, { ok: false, t: Date.now() });
     return false;
+  } finally {
+    clearTimeout(timeoutHandle);
   }
 }

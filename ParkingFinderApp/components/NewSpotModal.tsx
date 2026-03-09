@@ -57,6 +57,25 @@ function clampInt(value: number, min: number, max: number) {
 }
 
 const PICKER_ITEM_HEIGHT = 40;
+const CLOUD_WRITE_TIMEOUT_MS = 8_000;
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: string,
+): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+  });
+
+  try {
+    return (await Promise.race([promise, timeoutPromise])) as T;
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
 
 export function NewSpotModal({
   showModal,
@@ -142,14 +161,18 @@ export function NewSpotModal({
     await scheduleSpotNotification(localId, totalSeconds, spotType);
 
     try {
-      await createParkingReport({
-        latitude: newSpot.latitude,
-        longitude: newSpot.longitude,
-        type: newSpot.type,
-        rate: newSpot.rate,
-        durationSeconds: totalSeconds,
-        clientSpotId: localId,
-      });
+      await withTimeout(
+        createParkingReport({
+          latitude: newSpot.latitude,
+          longitude: newSpot.longitude,
+          type: newSpot.type,
+          rate: newSpot.rate,
+          durationSeconds: totalSeconds,
+          clientSpotId: localId,
+        }),
+        CLOUD_WRITE_TIMEOUT_MS,
+        'Cloud save timed out.',
+      );
 
       setAutoTakenBanner('Spot reported and shared.');
     } catch (e: any) {
