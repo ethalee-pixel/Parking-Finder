@@ -48,7 +48,7 @@ Inside `ParkingFinderApp/`:
 ## Local Development
 
 1. Open terminal at:
-   - `C:\Users\kylep\Downloads\Parking-Finder\ParkingFinderApp`
+   - `..\Parking-Finder\ParkingFinderApp`
 2. Install dependencies:
    - `npm install`
 3. Start Expo:
@@ -104,8 +104,6 @@ Recommended: attach APK to a GitHub Release (do not commit APK into source tree)
 
 ## iOS Release Path (When Ready)
 
-iOS does not use APK. You will build an IPA and distribute through TestFlight/App Store Connect.
-
 `eas.json` includes:
 
 - `preview-ios` profile (internal iOS build)
@@ -131,9 +129,3 @@ npx tsc --noEmit
 npx expo config --json
 npx expo-doctor
 ```
-
-## Notes
-
-- Android icon updates may require uninstall/reinstall due launcher cache.
-- Expo Go has limitations for some notification features.
-- Live availability quality depends on active user reporting and location accuracy.
