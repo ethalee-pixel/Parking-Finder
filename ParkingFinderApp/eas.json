@@ -13,6 +13,18 @@
       "android": {
         "buildType": "app-bundle"
       }
+    },
+    "preview-ios": {
+      "distribution": "internal",
+      "ios": {
+        "simulator": false
+      }
+    },
+    "production-ios": {
+      "autoIncrement": true,
+      "ios": {
+        "simulator": false
+      }
     }
   }
 }

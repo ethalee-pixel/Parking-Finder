@@ -17,11 +17,14 @@ import {
   type ParkingReport,
 } from '../services/parkingReports';
 
-type UserPos = { lat: number; lon: number };
+type UserPos = { lat: number; lon: number; atMs?: number };
 
 const DEFAULT_AUTO_TAKE_RADIUS_M = 25;
 const DEFAULT_AUTO_PLACE_DURATION_SECONDS = 30;
 const AUTO_REOPEN_MS = 60 * 60 * 1000;
+const STATIONARY_REQUIRED_MS = 30_000;
+const STATIONARY_MOVE_THRESHOLD_M = 8;
+const LOCATION_STALE_MS = 12_000;
 
 // How long to "ignore" a report after you undo it (prevents instant retake)
 const UNDO_COOLDOWN_MS = 90_000;
@@ -197,6 +200,11 @@ export function useProximityAutoTake({
   // Track a scheduled reopen timer for the report you took.
   const reopenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Track recent position movement so auto prompts only fire when parked/stationary.
+  const lastPosRef = useRef<{ lat: number; lon: number } | null>(null);
+  const stationaryAnchorRef = useRef<{ lat: number; lon: number } | null>(null);
+  const stationarySinceRef = useRef<number | null>(null);
+
   const canTakeAny = useMemo(() => {
     return Boolean(uid) && !hasManuallyTakenASpot && !isAutoTaking && !myTakenReportId;
   }, [uid, hasManuallyTakenASpot, isAutoTaking, myTakenReportId]);
@@ -249,6 +257,34 @@ export function useProximityAutoTake({
       next.delete(reportId);
       return next;
     });
+  };
+
+  const getStationaryDurationMs = (userPos: UserPos, nowMs: number) => {
+    const lastPos = lastPosRef.current;
+    const anchorPos = stationaryAnchorRef.current;
+
+    if (!lastPos || !anchorPos) {
+      lastPosRef.current = { lat: userPos.lat, lon: userPos.lon };
+      stationaryAnchorRef.current = { lat: userPos.lat, lon: userPos.lon };
+      stationarySinceRef.current = nowMs;
+      return 0;
+    }
+
+    const movedSinceLastM = distanceMeters(lastPos.lat, lastPos.lon, userPos.lat, userPos.lon);
+    const movedFromAnchorM = distanceMeters(anchorPos.lat, anchorPos.lon, userPos.lat, userPos.lon);
+
+    if (
+      movedSinceLastM > STATIONARY_MOVE_THRESHOLD_M ||
+      movedFromAnchorM > STATIONARY_MOVE_THRESHOLD_M
+    ) {
+      stationarySinceRef.current = nowMs;
+      stationaryAnchorRef.current = { lat: userPos.lat, lon: userPos.lon };
+    } else if (!stationarySinceRef.current) {
+      stationarySinceRef.current = nowMs;
+    }
+
+    lastPosRef.current = { lat: userPos.lat, lon: userPos.lon };
+    return nowMs - (stationarySinceRef.current ?? nowMs);
   };
 
   const scheduleAutoReopen = (reportId: string) => {
@@ -332,9 +368,7 @@ export function useProximityAutoTake({
     alreadyAutoTakenRef.current.delete(reportId);
   };
 
-  const tryAutoTakeClosest = async (
-    opts?: { forcePrompt?: boolean; showWhyNot?: boolean },
-  ) => {
+  const tryAutoTakeClosest = async (opts?: { forcePrompt?: boolean; showWhyNot?: boolean }) => {
     const forcePrompt = opts?.forcePrompt ?? false;
     const showWhyNot = opts?.showWhyNot ?? false;
 
@@ -355,13 +389,32 @@ export function useProximityAutoTake({
     }
 
     if (promptInFlightRef.current) {
-      if (showWhyNot) Alert.alert('Prompt already open', 'Respond to the current nearby prompt first.');
+      if (showWhyNot)
+        Alert.alert('Prompt already open', 'Respond to the current nearby prompt first.');
       return;
     }
 
     const userPos = userPosRef.current;
     if (!userPos) {
       if (showWhyNot) Alert.alert('Location unavailable', 'Waiting for your current location.');
+      return;
+    }
+
+    const nowMs = Date.now();
+    const userPosAgeMs = typeof userPos.atMs === 'number' ? nowMs - userPos.atMs : 0;
+    if (!forcePrompt && userPosAgeMs > LOCATION_STALE_MS) {
+      if (showWhyNot) {
+        Alert.alert('Location stale', 'Waiting for a fresh location update before auto check.');
+      }
+      return;
+    }
+
+    const stationaryForMs = getStationaryDurationMs(userPos, nowMs);
+    if (!forcePrompt && stationaryForMs < STATIONARY_REQUIRED_MS) {
+      if (showWhyNot) {
+        const secsLeft = Math.ceil((STATIONARY_REQUIRED_MS - stationaryForMs) / 1000);
+        Alert.alert('Keep stopped', `Stay near-stationary for about ${secsLeft}s to auto-check.`);
+      }
       return;
     }
 
@@ -474,6 +527,12 @@ export function useProximityAutoTake({
 
     return () => sub.remove();
   }, [uid, myTakenReportId, setAutoTakenBanner]);
+
+  useEffect(() => {
+    lastPosRef.current = null;
+    stationaryAnchorRef.current = null;
+    stationarySinceRef.current = null;
+  }, [uid]);
 
   useEffect(() => {
     return () => {

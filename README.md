@@ -1,136 +1,139 @@
 # ParkingFinder
 
-ParkingFinder is a real-time community parking availability app built with **React Native (Expo)** and **Firebase/Firestore**.
-Users can report when they leave a parking spot, and nearby drivers can see and claim that spot on a live map.
+ParkingFinder is a real-time community parking availability app built with React Native (Expo) and Firebase.
+Users report open spots on a live map, and other users can mark them as taken when they arrive.
 
----
+## Current Feature Set
 
-## Features
-
-### Core Functionality
-
-- Live map showing nearby parking spots
-- Free and paid parking spot reporting
-- Real-time Firestore synchronization
-- Auto-expiration of old parking spots
-- "Mark as Taken" system to prevent stale spots
-
-### Smart Behavior
-
-- Auto-take detection when a user arrives at a reported spot
-- Distance validation (must be near the spot to claim it)
-- Expiration warning notifications
-- Undo system (45-second grace period)
-- Local fallback if the network fails
-
-### User Experience
-
-- Color-coded markers:
-  - 🟢 Active
-  - 🔴 Expiring Soon
-  - ⚫ Expired
-  - 🔴 **T** = Taken
-
-- History of user-reported spots
-- Filters and sorting in history view
-- Persistent login using Firebase Auth
-- Notifications for expiring spots
-
----
+- Email/password authentication (sign up + login)
+- Live map centered on user location
+- Long-press spot reporting with free/paid + duration
+- Placement validation:
+  - Must be near current user location
+  - Must be near a road/parking area (OSM Overpass validation)
+- Spot lifecycle:
+  - Active, expiring, and expired states
+  - Auto-expiration of stale reports
+  - Manual and automatic mark-as-taken flows with confirmation
+- Reliability features:
+  - Undo window after mark-as-taken
+  - Unstuck action for stale lock recovery
+  - Local fallback queue + cloud sync retry
+- Report history with filtering and sorting
 
 ## Tech Stack
 
-**Frontend**
-
-- React Native (Expo)
+- React Native (Expo SDK 54)
 - TypeScript
 - React Navigation
 - React Native Maps
+- Firebase Auth + Firestore (web SDK)
+- Expo Location + Expo Notifications
+- Overpass API (road/parking validation)
 
-**Backend**
+## Repository Layout
 
-- Firebase Authentication
-- Firebase Firestore (real-time database)
-- Geohash queries for location filtering
+- `ParkingFinderApp/` - mobile app source
+- `docs/` - project documentation assets
 
-**APIs & Services**
+Inside `ParkingFinderApp/`:
 
-- Expo Location
-- Expo Notifications
-- OpenStreetMap Overpass API (road validation)
+- `app/screens/` - screen-level UI (`Login`, `Map`)
+- `components/` - modals and overlay UI
+- `hooks/` - business logic hooks
+- `services/` - Firestore repository logic
+- `utils/` - geo/time/notification helpers
+- `types/` - shared TypeScript types
 
----
+## Local Development
 
-## How It Works
+1. Open terminal at:
+   - `C:\Users\kylep\Downloads\Parking-Finder\ParkingFinderApp`
+2. Install dependencies:
+   - `npm install`
+3. Start Expo:
+   - `npm start`
+4. Optional shortcuts:
+   - `npm run android`
+   - `npm run ios`
 
-1. A user leaves a parking spot and long-presses the map.
-2. The app verifies the location is near a road or parking area.
-3. The spot is uploaded to Firestore.
-4. Nearby users see the spot instantly.
-5. When someone parks, they mark it as taken (or it auto-detects arrival).
-6. The marker disappears for other users.
+## Code Style and Validation
 
-Spots automatically expire after their timer finishes.
+Prettier is the project formatter (`.prettierrc.json`).
 
----
+Run style check:
 
-## Project Structure
-
-```
-app/screens/      Main screens (Map, Login)
-components/       UI modals and overlays
-hooks/            Custom logic hooks (tracking, undo, firestore)
-utils/            Shared utilities (geo, time, notifications)
-types/            Shared TypeScript types
-parkingReports.ts Firestore repository layer
-```
-
----
-
-## Installation
-
-### 1. Clone the repository
-
-```
-git clone <your-repo-url>
-cd Parking-Finder/ParkingFinderApp
+```bash
+npx prettier --check .
 ```
 
-### 2. Install dependencies
+Run type check:
 
-```
-npm install
-```
-
-### 3. Start the app
-
-```
-npx expo start
+```bash
+npx tsc --noEmit
 ```
 
-Then open **Expo Go** on your phone and scan the QR code.
+## Android APK Build (EAS)
 
----
+`eas.json` already includes:
 
-## Notifications
+- `preview-apk` profile (builds installable APK)
+- `production` profile (builds AAB for Play Store)
 
-Android devices support scheduled notifications.
+Before building Android, ensure `expo.android.config.googleMaps.apiKey` is set in `ParkingFinderApp/app.json`.
 
-Expo Go on iOS does **not** support local scheduled notifications, so expiration alerts will only appear on Android or a development build.
+**IT WILL CRASH WITHOUT AN API KEY!!!**
 
----
+Build APK:
 
-## Known Limitations
+```bash
+npx eas-cli@latest login
+npx eas-cli@latest build -p android --profile preview-apk --clear-cache
+```
 
-- Requires internet connection for shared spots
-- Location accuracy depends on device GPS
-- iOS Expo Go cannot schedule background notifications
-- Parking availability depends on active users
+After build completes, download APK from the EAS build URL.
 
----
+## GitHub Release Flow (APK)
 
-## Authors
+Recommended: attach APK to a GitHub Release (do not commit APK into source tree).
 
-Developed as a university software project using Agile methodology and iterative testing.
+1. Commit code and push `main`
+2. Tag release (example `v1.0.0`)
+3. Create GitHub Release for that tag
+4. Upload the APK as a release asset
 
----
+## iOS Release Path (When Ready)
+
+iOS does not use APK. You will build an IPA and distribute through TestFlight/App Store Connect.
+
+`eas.json` includes:
+
+- `preview-ios` profile (internal iOS build)
+- `production-ios` profile (store/TestFlight iOS build)
+
+High-level steps:
+
+1. Build iOS artifact:
+   - Internal: `npx eas-cli@latest build -p ios --profile preview-ios`
+   - TestFlight-ready: `npx eas-cli@latest build -p ios --profile production-ios`
+2. Submit latest iOS build to App Store Connect:
+   - `npx eas-cli@latest submit -p ios --latest`
+
+Requires Apple Developer Program access.
+
+## Release 1.0.0 Quick Gate
+
+Run before tagging release:
+
+```bash
+npx prettier --check .
+npx tsc --noEmit
+npx expo config --json
+npx expo-doctor
+```
+
+## Notes
+
+- Android icon updates may require uninstall/reinstall due launcher cache.
+- Expo Go has limitations for some notification features.
+- Live availability quality depends on active user reporting and location accuracy.

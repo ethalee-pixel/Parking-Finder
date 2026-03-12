@@ -3,7 +3,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, StyleSheet, Text, View } from 'react-native';
-import MapView, { Marker, Region } from 'react-native-maps';
+import MapView, { Marker, Region, type UserLocationChangeEvent } from 'react-native-maps';
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
@@ -58,8 +58,10 @@ const REGION_DEBOUNCE_MS = 400;
 const TICK_INTERVAL_MS = 1000;
 const AUTO_TAKEN_BANNER_MS = 4000;
 
-const LOCATION_WATCH_TIME_INTERVAL_MS = 3000;
-const LOCATION_WATCH_DISTANCE_INTERVAL_M = 3;
+const LOCATION_WATCH_TIME_INTERVAL_MS = 1000;
+const LOCATION_WATCH_DISTANCE_INTERVAL_M = 1;
+const MAP_USER_LOCATION_UPDATE_INTERVAL_MS = 1000;
+const MAP_USER_LOCATION_FASTEST_INTERVAL_MS = 500;
 const PLACEMENT_VALIDATE_TIMEOUT_MS = 7_000;
 
 // Used to type marker modal selection.
@@ -113,7 +115,7 @@ export default function MapScreen() {
   const didCenterOnUserRef = useRef(false);
 
   // Latest known GPS position for proximity checks (manual-taken).
-  const userPosRef = useRef<{ lat: number; lon: number } | null>(null);
+  const userPosRef = useRef<{ lat: number; lon: number; atMs: number } | null>(null);
 
   // Foreground location watcher used to keep userPosRef fresh while moving.
   const locationWatchRef = useRef<Location.LocationSubscription | null>(null);
@@ -533,6 +535,7 @@ export default function MapScreen() {
       const pos = {
         lat: loc.coords.latitude,
         lon: loc.coords.longitude,
+        atMs: Date.now(),
       };
 
       userPosRef.current = pos;
@@ -556,6 +559,7 @@ export default function MapScreen() {
       userPosRef.current = {
         lat: loc.coords.latitude,
         lon: loc.coords.longitude,
+        atMs: Date.now(),
       };
 
       const userRegion: Region = {
@@ -580,6 +584,17 @@ export default function MapScreen() {
     }
 
     await tryAutoTakeClosest({ forcePrompt: true, showWhyNot: true });
+  };
+
+  const handleUserLocationChange = (event: UserLocationChangeEvent) => {
+    const coord = event.nativeEvent.coordinate;
+    if (!coord) return;
+
+    userPosRef.current = {
+      lat: coord.latitude,
+      lon: coord.longitude,
+      atMs: Date.now(),
+    };
   };
 
   // Renders a large red circle marker with a "T" to indicate a taken spot.
@@ -708,7 +723,7 @@ export default function MapScreen() {
         locationWatchRef.current?.remove();
         locationWatchRef.current = await Location.watchPositionAsync(
           {
-            accuracy: Location.Accuracy.Balanced,
+            accuracy: Location.Accuracy.High,
             timeInterval: LOCATION_WATCH_TIME_INTERVAL_MS,
             distanceInterval: LOCATION_WATCH_DISTANCE_INTERVAL_M,
           },
@@ -718,6 +733,7 @@ export default function MapScreen() {
             userPosRef.current = {
               lat: loc.coords.latitude,
               lon: loc.coords.longitude,
+              atMs: Date.now(),
             };
           },
         );
@@ -838,6 +854,7 @@ export default function MapScreen() {
           userPosRef.current = {
             lat: loc.coords.latitude,
             lon: loc.coords.longitude,
+            atMs: Date.now(),
           };
 
           const userRegion: Region = {
@@ -1008,6 +1025,10 @@ export default function MapScreen() {
         showsUserLocation
         showsMyLocationButton={false}
         followsUserLocation={false}
+        userLocationPriority="high"
+        userLocationUpdateInterval={MAP_USER_LOCATION_UPDATE_INTERVAL_MS}
+        userLocationFastestInterval={MAP_USER_LOCATION_FASTEST_INTERVAL_MS}
+        onUserLocationChange={handleUserLocationChange}
         onLongPress={handleMapLongPress}
         onRegionChangeComplete={handleRegionChangeComplete}
         onMapReady={() => {
