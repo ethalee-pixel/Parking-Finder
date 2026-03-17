@@ -22,6 +22,7 @@ Notifications.setNotificationHandler({
 // Requests notification permissions if not already granted.
 // Returns true if granted, false otherwise.
 export async function requestNotificationPermissions(): Promise<boolean> {
+  // user story 1.3
   const { status: existingStatus } = await Notifications.getPermissionsAsync();
   let finalStatus = existingStatus;
 
@@ -57,6 +58,7 @@ export async function scheduleSpotNotification(
   const hasPermission = await requestNotificationPermissions();
   if (!hasPermission) return null;
 
+  // user story 1.3
   const warningTimeSeconds = Math.floor(durationSeconds * 0.9);
   const secondsRemaining = Math.max(0, durationSeconds - warningTimeSeconds);
 

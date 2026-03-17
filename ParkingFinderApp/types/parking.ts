@@ -1,6 +1,5 @@
 // types/parking.ts
 // Shared data models and AsyncStorage keys used across the app.
-
 export type SpotType = 'free' | 'paid';
 
 /**
@@ -15,6 +14,7 @@ export type ParkingSpot = {
   latitude: number;
   longitude: number;
 
+  // user story 2.2
   type: SpotType;
 
   // Only present for paid spots (ex: "$2/hr")
@@ -33,6 +33,7 @@ export type ParkingSpot = {
   version: number;
 
   // Lifetime of the spot in seconds
+  // user story 1.1
   durationSeconds: number;
 
   // Set once the spot is successfully saved to Firestore
@@ -40,7 +41,9 @@ export type ParkingSpot = {
 };
 
 // Persist local spots across app restarts
+// user story 3.2
 export const STORAGE_KEY = '@parking_spots';
 
 // Tracks which Firestore report the user currently has marked as taken
+// user story 3.5
 export const MY_TAKEN_KEY = '@my_taken_report_id';

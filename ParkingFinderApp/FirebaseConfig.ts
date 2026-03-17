@@ -23,6 +23,7 @@ export const FIREBASE_APP = initializeApp(firebaseConfig);
 
 // Initialize Firebase Auth with AsyncStorage persistence
 // so login state survives app restarts.
+// user story 1.4
 export const FIREBASE_AUTH = initializeAuth(FIREBASE_APP, {
   persistence: getReactNativePersistence(AsyncStorage),
 });

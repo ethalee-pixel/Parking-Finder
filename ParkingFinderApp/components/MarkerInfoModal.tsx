@@ -4,7 +4,6 @@
 // - Remove Pin (owner/local only)
 // - Mark as Taken (open cloud reports, proximity-gated)
 // - Unmark (Reopen) (resolved cloud reports)
-
 import React, { useMemo } from 'react';
 import { Alert, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
@@ -54,6 +53,7 @@ type Props = {
 function getSpotTitle(data: any, isExpiringSoon: boolean): string {
   if (isExpiringSoon) return '⚠️ Expiring Soon!';
   if (data.type === 'free') return 'Free Spot';
+  // user story 2.2
   return `Paid: ${data.rate ?? ''}`.trim();
 }
 
@@ -79,6 +79,7 @@ export function MarkerInfoModal({
   const ageSeconds = data ? getAgeInSeconds(data.createdAt) : 0;
 
   // Expiring soon at 90% of lifetime.
+  // user story 2.4
   const isExpiringSoon = useMemo(() => {
     if (!data) return false;
     const warningThreshold = Math.floor(durationSeconds * 0.9);
@@ -122,6 +123,7 @@ export function MarkerInfoModal({
           text: 'Reopen',
           onPress: async () => {
             close();
+            // user story 3.5
             await onReopenReport(reportId);
           },
         },
@@ -179,6 +181,7 @@ export function MarkerInfoModal({
 
   return (
     // Tapping the dark overlay closes the modal.
+    // user story 1.2
     <Modal
       visible={selectedMarker !== null}
       transparent
@@ -214,6 +217,7 @@ export function MarkerInfoModal({
               )}
 
               {/* Mark as Taken for open cloud reports */}
+              {/* user story 4.2 */}
               {showMarkTakenForOpenCloud && (
                 <TouchableOpacity
                   style={[styles.takeButton, markTakenDisabled && styles.takeButtonDisabled]}
@@ -232,6 +236,7 @@ export function MarkerInfoModal({
               )}
 
               {/* Mark as Taken for items that carry a firestoreId (rare, but supported) */}
+              {/* user story 4.2 */}
               {showMarkTakenForFirestoreId && (
                 <TouchableOpacity
                   style={[styles.takeButton, markTakenDisabled && styles.takeButtonDisabled]}

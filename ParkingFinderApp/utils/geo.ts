@@ -25,6 +25,7 @@ export function distanceMeters(aLat: number, aLon: number, bLat: number, bLon: n
 
   const s = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
 
+  // user story 2.1
   return 2 * R * Math.asin(Math.sqrt(s));
 }
 
@@ -38,6 +39,7 @@ export function isNearMe(
 ): { ok: boolean; dist: number } {
   if (!userPos) return { ok: false, dist: Number.POSITIVE_INFINITY };
 
+  // user story 4.2
   const dist = distanceMeters(userPos.lat, userPos.lon, lat, lon);
   return { ok: dist <= radiusM, dist };
 }
@@ -60,6 +62,7 @@ export function safeCoord(lat: unknown, lon: unknown): LatLng | null {
 
 // Converts a MapView Region into a bounding box (used for Firestore geo queries).
 export function regionToBounds(r: Region): Bounds {
+  // user story 3.3
   const minLat = r.latitude - r.latitudeDelta / 2;
   const maxLat = r.latitude + r.latitudeDelta / 2;
   const minLng = r.longitude - r.longitudeDelta / 2;
@@ -98,6 +101,7 @@ export async function isNearRoadOrParkingOSM(
   const cached = overpassCache.get(key);
   if (cached && Date.now() - cached.t < OVERPASS_CACHE_MS) return cached.ok;
 
+  // user story 4.4
   const query = `
 [out:json][timeout:8];
 (

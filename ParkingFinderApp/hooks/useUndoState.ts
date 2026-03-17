@@ -1,6 +1,5 @@
 // useUndoState - manages the undo banner shown after a spot is marked taken.
 // Gives the user a 45-second window to reverse the action.
-
 import { useEffect, useRef, useState } from 'react';
 import { Alert } from 'react-native';
 
@@ -53,6 +52,7 @@ export function useUndoState(
       undoTimerRef.current = null;
     }
 
+    // user story 3.5
     const expiresAt = Date.now() + UNDO_WINDOW_MS;
     setUndoState({ reportId, message, expiresAt, isProcessing: false });
 
@@ -79,6 +79,7 @@ export function useUndoState(
     setUndoState({ ...undoState, isProcessing: true });
 
     try {
+      // user story 3.5
       await reopenParkingReport(undoState.reportId);
 
       // Clear "my taken report" tracking if we just undid it

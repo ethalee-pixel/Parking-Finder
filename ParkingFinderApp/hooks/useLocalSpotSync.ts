@@ -1,7 +1,6 @@
 // useLocalSpotSync.ts
 // Retries unsynced local spots and uploads them to Firestore when possible.
 // Uses deterministic clientSpotId writes to avoid duplicate cloud reports.
-
 import { useCallback, useEffect, useRef } from 'react';
 import { AppState } from 'react-native';
 
@@ -48,6 +47,7 @@ export function useLocalSpotSync({ uid, spots, setSpots, onSpotSynced }: Params)
       syncingIdsRef.current.add(spot.id);
 
       try {
+        // user story 3.2
         const firestoreId = await createParkingReport({
           latitude: spot.latitude,
           longitude: spot.longitude,
@@ -71,6 +71,7 @@ export function useLocalSpotSync({ uid, spots, setSpots, onSpotSynced }: Params)
   const syncPendingSpots = useCallback(async () => {
     if (!uid) return;
 
+    // user story 3.2
     const pendingSpots = spotsRef.current.filter((spot) => !spot.firestoreId);
     for (const spot of pendingSpots) {
       await syncSpot(spot);

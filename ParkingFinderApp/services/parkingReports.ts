@@ -132,6 +132,8 @@ export function subscribeToParkingReportsInBounds(
   for (let rangeIndex = 0; rangeIndex < geobounds.length; rangeIndex += 1) {
     const [start, end] = geobounds[rangeIndex];
 
+    // user story 2.3
+    // user story 3.3
     const q = query(
       collection(FIRESTORE_DB, 'parkingReports'),
       orderBy('geohash'),
@@ -209,6 +211,9 @@ export async function createParkingReport(data: ParkingReportCreate): Promise<st
     throw new Error(`Invalid coordinates: ${data.latitude}, ${data.longitude}`);
   }
   const geohash = geohashForLocation([coord.latitude, coord.longitude]);
+  // user story 1.1
+  // user story 2.1
+  // user story 4.1
   const payload = {
     userId: user.uid,
     createdBy: user.uid,
@@ -223,6 +228,7 @@ export async function createParkingReport(data: ParkingReportCreate): Promise<st
     clientSpotId: data.clientSpotId ?? null,
   };
   // Deterministic document IDs make offline retry idempotent.
+  // user story 3.2
   if (data.clientSpotId) {
     const safeClientSpotId = encodeURIComponent(data.clientSpotId);
     const idempotentDocId = `client-${user.uid}-${safeClientSpotId}`;
@@ -251,6 +257,10 @@ export async function markReportTaken(reportId: string): Promise<void> {
   const user = FIREBASE_AUTH.currentUser;
   if (!user) throw new Error('Not logged in');
 
+  // user story 3.4
+  // user story 4.1
+  // user story 4.2
+  // user story 4.3
   await updateDoc(doc(FIRESTORE_DB, 'parkingReports', reportId), {
     status: 'resolved',
     resolvedBy: user.uid,
@@ -264,6 +274,7 @@ export async function reopenParkingReport(reportId: string): Promise<void> {
   const user = FIREBASE_AUTH.currentUser;
   if (!user) throw new Error('Not logged in');
 
+  // user story 3.5
   await updateDoc(doc(FIRESTORE_DB, 'parkingReports', reportId), {
     status: 'open',
     resolvedAt: null,
@@ -329,6 +340,7 @@ export function subscribeToMyParkingReports(
     return () => {};
   }
 
+  // user story 3.1
   const q = query(
     collection(FIRESTORE_DB, 'parkingReports'),
     where('userId', '==', user.uid),

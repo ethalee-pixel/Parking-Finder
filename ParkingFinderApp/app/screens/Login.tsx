@@ -46,6 +46,7 @@ export default function Login() {
     setIsLoading(true);
 
     try {
+      // user story 1.4
       await signInWithEmailAndPassword(FIREBASE_AUTH, email.trim(), password);
     } catch (err: unknown) {
       showAuthError('Login failed', err);
@@ -59,6 +60,7 @@ export default function Login() {
     setIsLoading(true);
 
     try {
+      // user story 1.4
       await createUserWithEmailAndPassword(FIREBASE_AUTH, email.trim(), password);
     } catch (err: unknown) {
       showAuthError('Sign up failed', err);

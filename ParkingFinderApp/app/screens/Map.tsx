@@ -1,6 +1,5 @@
 // Map.tsx
 // Main map screen. Renders the map + markers and connects hooks + modals.
-
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, StyleSheet, Text, View } from 'react-native';
 import MapView, { Marker, Region, type UserLocationChangeEvent } from 'react-native-maps';
@@ -183,6 +182,7 @@ export default function MapScreen() {
   const [autoTakenBanner, setAutoTakenBanner] = useState<string | null>(null);
 
   // Undo banner state + undo handler.
+  // user story 3.5
   const { undoState, showUndoBanner, undoAutoTaken, clearUndoBanner } = useUndoState(
     myTakenReportId,
     setMyTakenReportId,
@@ -192,6 +192,9 @@ export default function MapScreen() {
   );
 
   // Firestore subscriptions for reports in visible area and "my reports".
+  // user story 2.3
+  // user story 3.1
+  // user story 3.3
   const { cloudReports, myReports } = useParkingReports(visibleRegion, uid);
 
   // Cloud reports eligible for auto-take checks (in region + not hidden + not expired).
@@ -208,6 +211,7 @@ export default function MapScreen() {
   );
 
   // Retry local fallback spots and remove them once cloud sync succeeds.
+  // user story 3.2
   useLocalSpotSync({
     uid,
     spots,
@@ -217,6 +221,9 @@ export default function MapScreen() {
     },
   });
 
+  // user story 3.4
+  // user story 4.1
+  // user story 4.3
   const { tryAutoTakeClosest } = useProximityAutoTake({
     uid,
     cloudReports: autoTakeCloudReports,
@@ -256,6 +263,7 @@ export default function MapScreen() {
           const timeRemainingSeconds = durationSeconds - ageSeconds;
           const spotLabel = spot.type === 'free' ? 'Free' : 'Paid';
 
+          // user story 1.3
           Alert.alert(
             'Parking Spot Expiring Soon',
             `Your ${spotLabel} parking spot will expire in ${formatDuration(
@@ -270,6 +278,7 @@ export default function MapScreen() {
     }
 
     // Remove fully expired LOCAL spots (device-saved only).
+    // user story 1.3
     setSpots((prev) => {
       const stillValid = prev.filter((spot) => {
         const ageSeconds = getAgeInSeconds(spot.createdAt);
@@ -424,6 +433,7 @@ export default function MapScreen() {
 
     setIsAutoTaking(true);
     try {
+      // user story 4.2
       await markReportTaken(reportId);
 
       setMyTakenReportId(reportId);
@@ -574,6 +584,7 @@ export default function MapScreen() {
       console.error('centerOnUser failed:', err);
     }
   };
+
   const handleCheckNearby = async () => {
     if (isCreatingSpot || isAutoTaking || isValidatingPlacement) return;
 
@@ -583,6 +594,7 @@ export default function MapScreen() {
       return;
     }
 
+    // user story 4.1
     await tryAutoTakeClosest({ forcePrompt: true, showWhyNot: true });
   };
 
@@ -633,12 +645,15 @@ export default function MapScreen() {
       const takenByMe = data.id === myTakenReportId;
       if (!takenByMe) return null;
 
+      // user story 2.5
       return renderTakenTMarker(data.id, coord.latitude, coord.longitude, () => {
         setSelectedMarker({ data, isCloud: true });
       });
     }
 
     const durationSeconds = getDurationSeconds(data);
+    // user story 2.4
+    // user story 2.5
     const { color, expired } = getPinStatus(data.createdAt, durationSeconds);
 
     if (expired) return null;
@@ -647,6 +662,7 @@ export default function MapScreen() {
       <Marker
         key={`${isCloud ? 'cloud' : 'local'}-${data.id}-view-v1`}
         coordinate={coord}
+        // user story 2.3
         onPress={() => setSelectedMarker({ data, isCloud })}
         anchor={{ x: 0.5, y: 0.5 }}
       >
@@ -674,6 +690,7 @@ export default function MapScreen() {
         return;
       }
 
+      // user story 2.1
       const tapDistanceM = distanceMeters(userPos.lat, userPos.lon, latitude, longitude);
       if (tapDistanceM > MAX_PIN_PLACE_DISTANCE_M) {
         Alert.alert(
@@ -683,6 +700,7 @@ export default function MapScreen() {
         return;
       }
 
+      // user story 4.4
       const isRoadOrParking = await withTimeoutFallback(
         isNearRoadOrParkingOSM(latitude, longitude),
         PLACEMENT_VALIDATE_TIMEOUT_MS,
@@ -696,6 +714,7 @@ export default function MapScreen() {
         return;
       }
 
+      // user story 1.1
       setPendingCoord({ latitude, longitude });
       setShowModal(true);
     } finally {
@@ -706,6 +725,7 @@ export default function MapScreen() {
   // Debounces the visible region update to avoid excessive Firestore queries.
   const handleRegionChangeComplete = (r: Region) => {
     if (regionDebounceRef.current) clearTimeout(regionDebounceRef.current);
+    // user story 3.3
     regionDebounceRef.current = setTimeout(() => setVisibleRegion(r), REGION_DEBOUNCE_MS);
   };
 
@@ -783,6 +803,7 @@ export default function MapScreen() {
   useEffect(() => {
     const restoreTakenReportId = async () => {
       try {
+        // user story 3.5
         const saved = await AsyncStorage.getItem(MY_TAKEN_KEY);
         if (saved) setMyTakenReportId(saved);
       } catch (err: unknown) {
@@ -815,6 +836,7 @@ export default function MapScreen() {
         const { status } = await Location.requestForegroundPermissionsAsync();
 
         // Restore locally saved spots from AsyncStorage.
+        // user story 3.2
         const savedSpots = await AsyncStorage.getItem(STORAGE_KEY);
         if (savedSpots) {
           const parsed: unknown = JSON.parse(savedSpots);
@@ -981,6 +1003,7 @@ export default function MapScreen() {
   useEffect(() => {
     const persistSpots = async () => {
       try {
+        // user story 3.2
         await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(spots));
       } catch (err: unknown) {
         console.warn('Failed to persist spots:', err);
@@ -995,6 +1018,7 @@ export default function MapScreen() {
     const persistTaken = async () => {
       try {
         if (myTakenReportId) {
+          // user story 3.5
           await AsyncStorage.setItem(MY_TAKEN_KEY, myTakenReportId);
         } else {
           await AsyncStorage.removeItem(MY_TAKEN_KEY);
@@ -1018,6 +1042,7 @@ export default function MapScreen() {
 
   return (
     <View style={styles.container}>
+      {/* user story 1.2 */}
       <MapView
         ref={mapRef}
         style={styles.map}

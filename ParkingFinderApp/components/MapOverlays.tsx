@@ -1,7 +1,6 @@
 // MapOverlays.tsx
 // UI elements that appear on top of the map: non-blocking centered loading indicator,
 // status legend, history/sign-out buttons, recenter button, and a shared bottom banner.
-
 import React, { useMemo } from 'react';
 import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
@@ -48,6 +47,7 @@ export function MapOverlays({
     return Math.max(0, Math.ceil((undoState.expiresAt - Date.now()) / 1000));
   }, [undoState]);
 
+  // user story 3.5
   const bottomBannerMessage = undoState
     ? `${undoState.message} Undo? (${undoSecondsLeft}s)`
     : autoTakenBanner;
@@ -61,6 +61,7 @@ export function MapOverlays({
       : 'Updating...';
 
   return (
+    // user story 1.2
     <>
       {isBusy && (
         <View pointerEvents="none" style={styles.loadingOverlay}>
@@ -71,6 +72,8 @@ export function MapOverlays({
         </View>
       )}
 
+      {/* user story 2.4 */}
+      {/* user story 2.5 */}
       <View style={styles.colorGuide}>
         <Text style={styles.guideTitle}>Status</Text>
 
@@ -93,6 +96,7 @@ export function MapOverlays({
         <Text style={styles.actionBtnText}>Sign Out</Text>
       </TouchableOpacity>
 
+      {/* user story 4.1 */}
       <TouchableOpacity style={[styles.actionBtn, styles.checkNearbyBtn]} onPress={onCheckNearby}>
         <Text style={styles.actionBtnText}>Check Nearby</Text>
       </TouchableOpacity>

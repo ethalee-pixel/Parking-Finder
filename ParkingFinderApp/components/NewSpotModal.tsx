@@ -7,7 +7,6 @@
 // - attempts to create a cloud report as OPEN
 // - uses a deterministic clientSpotId for idempotent retries
 // - if cloud write fails, saves locally so the sync hook can retry later
-
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
@@ -89,6 +88,7 @@ export function NewSpotModal({
   setAutoTakenBanner,
 }: Props) {
   // Free vs paid selector.
+  // user story 2.2
   const [spotType, setSpotType] = useState<SpotType>('free');
 
   // Rate string for paid spots only (example: "$2/hr").
@@ -141,6 +141,8 @@ export function NewSpotModal({
     const localId = `spot-${timestamp}-${Math.random()}`;
 
     // Build the local fallback spot object.
+    // user story 1.1
+    // user story 2.1
     const newSpot: ParkingSpot = {
       id: localId,
       latitude: pendingCoord.latitude,
@@ -159,10 +161,12 @@ export function NewSpotModal({
 
     try {
       // Notification scheduling is best-effort and should not block pin creation.
+      // user story 1.3
       void scheduleSpotNotification(localId, totalSeconds, spotType).catch((err: unknown) => {
         console.warn('Failed to schedule spot notification:', err);
       });
 
+      // user story 3.2
       await withTimeout(
         createParkingReport({
           latitude: newSpot.latitude,
@@ -195,6 +199,7 @@ export function NewSpotModal({
   };
 
   return (
+    // user story 1.2
     <Modal visible={showModal} transparent animationType="slide">
       {/* Shifts content up when the keyboard appears. */}
       <KeyboardAvoidingView behavior="padding" style={styles.modalOverlay}>

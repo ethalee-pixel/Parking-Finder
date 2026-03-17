@@ -1,7 +1,6 @@
 // App.tsx
 // App entry point. Sets up navigation and routes users to Login or Map
 // based on Firebase Auth state.
-
 import { useEffect, useState } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -25,6 +24,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // user story 1.4
     const unsubscribe = onAuthStateChanged(FIREBASE_AUTH, (u) => {
       setUser(u);
       setLoading(false);
@@ -43,6 +43,7 @@ export default function App() {
         {user ? (
           <Stack.Screen name="Map" component={MapScreen} />
         ) : (
+          // user story 1.4
           <Stack.Screen name="Login" component={Login} />
         )}
       </Stack.Navigator>

@@ -29,8 +29,10 @@ export function useParkingReports(
   // Re-subscribe to cloud reports whenever the visible region changes.
   // Converts the region to lat/lng bounds and uses that to scope the Firestore query.
   useEffect(() => {
+    // user story 3.3
     const bounds = regionToBounds(visibleRegion);
 
+    // user story 2.3
     const unsubscribe = subscribeToParkingReportsInBounds(
       bounds,
       (reports) => setCloudReports(reports),
@@ -49,6 +51,7 @@ export function useParkingReports(
       return;
     }
 
+    // user story 3.1
     const unsubscribe = subscribeToMyParkingReports(
       (reports) => setMyReports(reports),
       (err) => console.log('My reports error:', err),

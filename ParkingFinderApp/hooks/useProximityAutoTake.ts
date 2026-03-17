@@ -5,7 +5,6 @@
 // 2) If not, ask to create a new pin at the user's location and mark it TAKEN.
 //
 // Enforces: one taken pin at a time via myTakenReportId gate.
-
 import { useEffect, useMemo, useRef } from 'react';
 import { Alert, AppState } from 'react-native';
 
@@ -307,6 +306,9 @@ export function useProximityAutoTake({
     alreadyAutoTakenRef.current.add(reportId);
 
     try {
+      // user story 3.4
+      // user story 4.1
+      // user story 4.3
       await withTimeout(
         markReportTaken(reportId),
         AUTO_TAKE_NETWORK_TIMEOUT_MS,
@@ -331,6 +333,7 @@ export function useProximityAutoTake({
     let reportId: string | null = null;
 
     try {
+      // user story 4.1
       reportId = await withTimeout(
         createParkingReport({
           latitude: userPos.lat,
@@ -343,6 +346,8 @@ export function useProximityAutoTake({
       );
 
       alreadyAutoTakenRef.current.add(reportId);
+      // user story 3.4
+      // user story 4.1
       await withTimeout(
         markReportTaken(reportId),
         AUTO_TAKE_NETWORK_TIMEOUT_MS,
@@ -364,6 +369,7 @@ export function useProximityAutoTake({
 
   // Call this after an UNDO succeeds so we don't instantly retake it.
   const markUndone = (reportId: string) => {
+    // user story 3.5
     cooldownUntilRef.current.set(reportId, Date.now() + UNDO_COOLDOWN_MS);
     alreadyAutoTakenRef.current.delete(reportId);
   };
@@ -418,6 +424,7 @@ export function useProximityAutoTake({
       return;
     }
 
+    // user story 4.3
     const best = pickClosestOpenReport(cloudReports, userPos, radiusM, hiddenCloudIds);
 
     if (best) {
@@ -433,6 +440,9 @@ export function useProximityAutoTake({
 
       promptInFlightRef.current = true;
       try {
+        // user story 3.4
+        // user story 4.1
+        // user story 4.3
         const decision = await confirmAutoAction(
           'Nearby parking spot found',
           `You are about ${Math.round(best.distM)}m from an open pin. Mark it as taken?`,
@@ -462,6 +472,7 @@ export function useProximityAutoTake({
 
     promptInFlightRef.current = true;
     try {
+      // user story 4.1
       const decision = await confirmAutoAction(
         'No nearby open spot',
         'No open pin is very close. Place a new pin at your location and mark it as taken?',

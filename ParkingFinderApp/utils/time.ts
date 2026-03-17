@@ -13,6 +13,8 @@ type FirestoreLikeTimestamp = { seconds: number };
  *  - ISO date string
  */
 export function getTimeInMillis(timeData: unknown): number {
+  // user story 1.3
+  // user story 3.1
   if (!timeData) return Date.now();
 
   // Firestore Timestamp
@@ -32,6 +34,9 @@ export function getTimeInMillis(timeData: unknown): number {
  * Returns how many seconds old a parking spot is.
  */
 export function getAgeInSeconds(createdAt: unknown): number {
+  // user story 1.3
+  // user story 2.4
+  // user story 3.1
   const timeInMillis = getTimeInMillis(createdAt);
   return Math.floor((Date.now() - timeInMillis) / 1000);
 }
@@ -44,6 +49,8 @@ export function getAgeInSeconds(createdAt: unknown): number {
  *  45   -> "45s"
  */
 export function formatDuration(totalSeconds: number): string {
+  // user story 1.3
+  // user story 3.1
   const seconds = Math.max(0, Math.floor(totalSeconds));
 
   const h = Math.floor(seconds / 3600);
@@ -69,6 +76,9 @@ export type PinStatus = {
  * - Green  (#00FF00): active
  */
 export function getPinStatus(createdAt: unknown, durationSeconds: number): PinStatus {
+  // user story 1.3
+  // user story 2.4
+  // user story 2.5
   const age = getAgeInSeconds(createdAt);
   const warningThreshold = Math.floor(durationSeconds * 0.9);
 

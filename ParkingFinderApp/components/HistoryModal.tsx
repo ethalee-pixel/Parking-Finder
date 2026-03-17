@@ -1,6 +1,5 @@
 // HistoryModal.tsx
 // Modal that shows the signed-in user's report history with simple filters + sorting.
-
 import React, { useMemo, useState } from 'react';
 import { FlatList, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import type MapView from 'react-native-maps';
@@ -67,6 +66,7 @@ export function HistoryModal({ showHistory, myReports, mapRef, setShowHistory }:
   const [historySort, setHistorySort] = useState<HistorySortOption>('newest');
 
   // Filter + sort are derived state.
+  // user story 3.1
   const filteredMyReports = useMemo(() => {
     const nowMs = Date.now();
     const rangeMs = getRangeMs(historyRange);
@@ -111,6 +111,7 @@ export function HistoryModal({ showHistory, myReports, mapRef, setShowHistory }:
   const close = () => setShowHistory(false);
 
   const focusMarker = (report: ParkingReport) => {
+    // user story 3.1
     mapRef.current?.animateToRegion(
       {
         latitude: report.latitude,
@@ -164,6 +165,7 @@ export function HistoryModal({ showHistory, myReports, mapRef, setShowHistory }:
   };
 
   return (
+    // user story 1.2
     <Modal visible={showHistory} transparent animationType="slide">
       <View style={styles.modalOverlay}>
         <View style={styles.modal}>
