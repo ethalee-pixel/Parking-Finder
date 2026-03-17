@@ -183,6 +183,12 @@ export default function MapScreen() {
 
   // Undo banner state + undo handler.
   // user story 3.5
+  // see MapOverlays.tsx line 31 for MapOverlays
+  // see MarkerInfoModal.tsx line 116 for confirmReopen
+  // see useProximityAutoTake.ts line 370 for markUndone
+  // see useUndoState.ts line 25 for useUndoState
+  // see parkingReports.ts line 273 for reopenParkingReport
+  // see parking.ts line 49 for MY_TAKEN_KEY
   const { undoState, showUndoBanner, undoAutoTaken, clearUndoBanner } = useUndoState(
     myTakenReportId,
     setMyTakenReportId,
@@ -193,8 +199,17 @@ export default function MapScreen() {
 
   // Firestore subscriptions for reports in visible area and "my reports".
   // user story 2.3
+  // see useParkingReports.ts line 20 for useParkingReports
+  // see parkingReports.ts line 106 for subscribeToParkingReportsInBounds
   // user story 3.1
+  // see HistoryModal.tsx line 60 for HistoryModal
+  // see useParkingReports.ts line 20 for useParkingReports
+  // see parkingReports.ts line 331 for subscribeToMyParkingReports
+  // see time.ts line 15 for getTimeInMillis
   // user story 3.3
+  // see useParkingReports.ts line 20 for useParkingReports
+  // see parkingReports.ts line 106 for subscribeToParkingReportsInBounds
+  // see geo.ts line 64 for regionToBounds
   const { cloudReports, myReports } = useParkingReports(visibleRegion, uid);
 
   // Cloud reports eligible for auto-take checks (in region + not hidden + not expired).
@@ -212,6 +227,10 @@ export default function MapScreen() {
 
   // Retry local fallback spots and remove them once cloud sync succeeds.
   // user story 3.2
+  // see NewSpotModal.tsx line 123 for saveSpot
+  // see useLocalSpotSync.ts line 20 for useLocalSpotSync
+  // see parkingReports.ts line 206 for createParkingReport
+  // see parking.ts line 45 for STORAGE_KEY
   useLocalSpotSync({
     uid,
     spots,
@@ -222,8 +241,15 @@ export default function MapScreen() {
   });
 
   // user story 3.4
+  // see useProximityAutoTake.ts line 163 for useProximityAutoTake
+  // see parkingReports.ts line 256 for markReportTaken
   // user story 4.1
+  // see MapOverlays.tsx line 31 for MapOverlays
+  // see useProximityAutoTake.ts line 377 for tryAutoTakeClosest
+  // see parkingReports.ts line 206 for createParkingReport
   // user story 4.3
+  // see useProximityAutoTake.ts line 56 for pickClosestOpenReport
+  // see parkingReports.ts line 256 for markReportTaken
   const { tryAutoTakeClosest } = useProximityAutoTake({
     uid,
     cloudReports: autoTakeCloudReports,
@@ -264,6 +290,9 @@ export default function MapScreen() {
           const spotLabel = spot.type === 'free' ? 'Free' : 'Paid';
 
           // user story 1.3
+          // see NewSpotModal.tsx line 123 for saveSpot
+          // see notifications.ts line 48 for scheduleSpotNotification
+          // see time.ts line 78 for getPinStatus
           Alert.alert(
             'Parking Spot Expiring Soon',
             `Your ${spotLabel} parking spot will expire in ${formatDuration(
@@ -279,6 +308,9 @@ export default function MapScreen() {
 
     // Remove fully expired LOCAL spots (device-saved only).
     // user story 1.3
+    // see NewSpotModal.tsx line 123 for saveSpot
+    // see notifications.ts line 48 for scheduleSpotNotification
+    // see time.ts line 78 for getPinStatus
     setSpots((prev) => {
       const stillValid = prev.filter((spot) => {
         const ageSeconds = getAgeInSeconds(spot.createdAt);
@@ -434,6 +466,9 @@ export default function MapScreen() {
     setIsAutoTaking(true);
     try {
       // user story 4.2
+      // see MarkerInfoModal.tsx line 134 for confirmMarkTaken
+      // see parkingReports.ts line 256 for markReportTaken
+      // see geo.ts line 34 for isNearMe
       await markReportTaken(reportId);
 
       setMyTakenReportId(reportId);
@@ -595,6 +630,9 @@ export default function MapScreen() {
     }
 
     // user story 4.1
+    // see MapOverlays.tsx line 31 for MapOverlays
+    // see useProximityAutoTake.ts line 377 for tryAutoTakeClosest
+    // see parkingReports.ts line 206 for createParkingReport
     await tryAutoTakeClosest({ forcePrompt: true, showWhyNot: true });
   };
 
@@ -646,6 +684,8 @@ export default function MapScreen() {
       if (!takenByMe) return null;
 
       // user story 2.5
+      // see MapOverlays.tsx line 31 for MapOverlays
+      // see time.ts line 78 for getPinStatus
       return renderTakenTMarker(data.id, coord.latitude, coord.longitude, () => {
         setSelectedMarker({ data, isCloud: true });
       });
@@ -653,7 +693,12 @@ export default function MapScreen() {
 
     const durationSeconds = getDurationSeconds(data);
     // user story 2.4
+    // see MapOverlays.tsx line 31 for MapOverlays
+    // see MarkerInfoModal.tsx line 60 for MarkerInfoModal
+    // see time.ts line 78 for getPinStatus
     // user story 2.5
+    // see MapOverlays.tsx line 31 for MapOverlays
+    // see time.ts line 78 for getPinStatus
     const { color, expired } = getPinStatus(data.createdAt, durationSeconds);
 
     if (expired) return null;
@@ -663,6 +708,8 @@ export default function MapScreen() {
         key={`${isCloud ? 'cloud' : 'local'}-${data.id}-view-v1`}
         coordinate={coord}
         // user story 2.3
+        // see useParkingReports.ts line 20 for useParkingReports
+        // see parkingReports.ts line 106 for subscribeToParkingReportsInBounds
         onPress={() => setSelectedMarker({ data, isCloud })}
         anchor={{ x: 0.5, y: 0.5 }}
       >
@@ -691,6 +738,9 @@ export default function MapScreen() {
       }
 
       // user story 2.1
+      // see NewSpotModal.tsx line 123 for saveSpot
+      // see parkingReports.ts line 206 for createParkingReport
+      // see geo.ts line 17 for distanceMeters
       const tapDistanceM = distanceMeters(userPos.lat, userPos.lon, latitude, longitude);
       if (tapDistanceM > MAX_PIN_PLACE_DISTANCE_M) {
         Alert.alert(
@@ -701,6 +751,7 @@ export default function MapScreen() {
       }
 
       // user story 4.4
+      // see geo.ts line 95 for isNearRoadOrParkingOSM
       const isRoadOrParking = await withTimeoutFallback(
         isNearRoadOrParkingOSM(latitude, longitude),
         PLACEMENT_VALIDATE_TIMEOUT_MS,
@@ -715,6 +766,9 @@ export default function MapScreen() {
       }
 
       // user story 1.1
+      // see NewSpotModal.tsx line 123 for saveSpot
+      // see parkingReports.ts line 206 for createParkingReport
+      // see parking.ts line 10 for ParkingSpot
       setPendingCoord({ latitude, longitude });
       setShowModal(true);
     } finally {
@@ -726,6 +780,9 @@ export default function MapScreen() {
   const handleRegionChangeComplete = (r: Region) => {
     if (regionDebounceRef.current) clearTimeout(regionDebounceRef.current);
     // user story 3.3
+    // see useParkingReports.ts line 20 for useParkingReports
+    // see parkingReports.ts line 106 for subscribeToParkingReportsInBounds
+    // see geo.ts line 64 for regionToBounds
     regionDebounceRef.current = setTimeout(() => setVisibleRegion(r), REGION_DEBOUNCE_MS);
   };
 
@@ -804,6 +861,12 @@ export default function MapScreen() {
     const restoreTakenReportId = async () => {
       try {
         // user story 3.5
+        // see MapOverlays.tsx line 31 for MapOverlays
+        // see MarkerInfoModal.tsx line 116 for confirmReopen
+        // see useProximityAutoTake.ts line 370 for markUndone
+        // see useUndoState.ts line 25 for useUndoState
+        // see parkingReports.ts line 273 for reopenParkingReport
+        // see parking.ts line 49 for MY_TAKEN_KEY
         const saved = await AsyncStorage.getItem(MY_TAKEN_KEY);
         if (saved) setMyTakenReportId(saved);
       } catch (err: unknown) {
@@ -837,6 +900,10 @@ export default function MapScreen() {
 
         // Restore locally saved spots from AsyncStorage.
         // user story 3.2
+        // see NewSpotModal.tsx line 123 for saveSpot
+        // see useLocalSpotSync.ts line 20 for useLocalSpotSync
+        // see parkingReports.ts line 206 for createParkingReport
+        // see parking.ts line 45 for STORAGE_KEY
         const savedSpots = await AsyncStorage.getItem(STORAGE_KEY);
         if (savedSpots) {
           const parsed: unknown = JSON.parse(savedSpots);
@@ -1004,6 +1071,10 @@ export default function MapScreen() {
     const persistSpots = async () => {
       try {
         // user story 3.2
+        // see NewSpotModal.tsx line 123 for saveSpot
+        // see useLocalSpotSync.ts line 20 for useLocalSpotSync
+        // see parkingReports.ts line 206 for createParkingReport
+        // see parking.ts line 45 for STORAGE_KEY
         await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(spots));
       } catch (err: unknown) {
         console.warn('Failed to persist spots:', err);
@@ -1019,6 +1090,12 @@ export default function MapScreen() {
       try {
         if (myTakenReportId) {
           // user story 3.5
+          // see MapOverlays.tsx line 31 for MapOverlays
+          // see MarkerInfoModal.tsx line 116 for confirmReopen
+          // see useProximityAutoTake.ts line 370 for markUndone
+          // see useUndoState.ts line 25 for useUndoState
+          // see parkingReports.ts line 273 for reopenParkingReport
+          // see parking.ts line 49 for MY_TAKEN_KEY
           await AsyncStorage.setItem(MY_TAKEN_KEY, myTakenReportId);
         } else {
           await AsyncStorage.removeItem(MY_TAKEN_KEY);
@@ -1043,6 +1120,10 @@ export default function MapScreen() {
   return (
     <View style={styles.container}>
       {/* user story 1.2 */}
+      {/* see HistoryModal.tsx line 60 for HistoryModal */}
+      {/* see MapOverlays.tsx line 31 for MapOverlays */}
+      {/* see MarkerInfoModal.tsx line 60 for MarkerInfoModal */}
+      {/* see NewSpotModal.tsx line 79 for NewSpotModal */}
       <MapView
         ref={mapRef}
         style={styles.map}
