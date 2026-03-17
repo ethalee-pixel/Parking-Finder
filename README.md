@@ -48,32 +48,15 @@ Inside `ParkingFinderApp/`:
 ## Local Development
 
 1. Open terminal at:
-   - `..\Parking-Finder\ParkingFinderApp`
+   - `ParkingFinderApp/`
 2. Install dependencies:
    - `npm install`
 3. Start Expo:
    - `npm start`
-4. Optional shortcuts:
-   - `npm run android`
-   - `npm run ios`
+   - or `npx expo start -c` more robustly
+4. Scan QR code or open in emulator.
 
-## Code Style and Validation
-
-Prettier is the project formatter (`.prettierrc.json`).
-
-Run style check:
-
-```bash
-npx prettier --check .
-```
-
-Run type check:
-
-```bash
-npx tsc --noEmit
-```
-
-## Android APK Build (EAS)
+## Android APK Build (through EAS)
 
 `eas.json` already includes:
 
