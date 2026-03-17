@@ -101,14 +101,3 @@ High-level steps:
    - `npx eas-cli@latest submit -p ios --latest`
 
 Requires Apple Developer Program access.
-
-## Release 1.0.0 Quick Gate
-
-Run before tagging release:
-
-```bash
-npx prettier --check .
-npx tsc --noEmit
-npx expo config --json
-npx expo-doctor
-```
